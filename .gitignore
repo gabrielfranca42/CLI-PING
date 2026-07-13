@@ -1,0 +1,43 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+cli-ping
+cli-ping.exe
+
+# Build output
+/bin/
+/dist/
+/build/
+
+# Test binary
+*.test
+
+# Go workspace file
+go.work
+go.work.sum
+
+# Coverage
+*.out
+coverage.html
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+
+# Vendor (optional, uncomment if not vendoring)
+# /vendor/
+
+# Debug
+__debug_bin*
