@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/gopacket"
+	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
 )
 
@@ -84,11 +85,20 @@ func (s *SnifferService) SniffNetwork(stopCh chan struct{}) {
 			var srcPort, dstPort string
 			var protocol string = "Desconhecido"
 
+			var ttl uint8
+
 			// Extrai a camada de Rede (Ex: IPv4, IPv6)
 			if netLayer := packet.NetworkLayer(); netLayer != nil {
 				srcIP = netLayer.NetworkFlow().Src().String()
 				dstIP = netLayer.NetworkFlow().Dst().String()
 				protocol = netLayer.LayerType().String()
+
+				// Extrai o TTL para OS Fingerprinting (Auditoria Defensiva)
+				if ipv4Layer := packet.Layer(layers.LayerTypeIPv4); ipv4Layer != nil {
+					ipv4, _ := ipv4Layer.(*layers.IPv4)
+					ttl = ipv4.TTL
+				}
+
 			} else {
 				// Ignora pacotes sem IP (como Spanning Tree, etc) para não sujar muito a tela, 
 				// mas se quiser ver TUDO mesmo, pode remover esse continue.
@@ -102,6 +112,16 @@ func (s *SnifferService) SniffNetwork(stopCh chan struct{}) {
 				dstPort = transportLayer.TransportFlow().Dst().String()
 			}
 
+			// Extrai a camada de Aplicação: DNS (Monitoramento de tráfego / Auditoria)
+			var dnsQuery string
+			if dnsLayer := packet.Layer(layers.LayerTypeDNS); dnsLayer != nil {
+				dns, _ := dnsLayer.(*layers.DNS)
+				// Se for uma requisição de pergunta (Query) e tiver perguntas
+				if dns.OpCode == layers.DNSOpCodeQuery && len(dns.Questions) > 0 {
+					dnsQuery = string(dns.Questions[0].Name)
+				}
+			}
+
 			// Formata a saída para o terminal (Mini Wireshark)
 			portInfoSrc := ""
 			portInfoDst := ""
@@ -112,7 +132,15 @@ func (s *SnifferService) SniffNetwork(stopCh chan struct{}) {
 				portInfoDst = ":" + dstPort
 			}
 
-			fmt.Printf("  [>] %s%s -> %s%s [%s]\n", srcIP, portInfoSrc, dstIP, portInfoDst, protocol)
+			extraInfo := ""
+			if ttl > 0 {
+				extraInfo += fmt.Sprintf(" [TTL:%d]", ttl)
+			}
+			if dnsQuery != "" {
+				extraInfo += fmt.Sprintf(" [DNS Query: %s]", dnsQuery)
+			}
+
+			fmt.Printf("  [>] %s%s -> %s%s [%s]%s\n", srcIP, portInfoSrc, dstIP, portInfoDst, protocol, extraInfo)
 		}
 	}
 }
