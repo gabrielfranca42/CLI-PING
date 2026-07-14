@@ -6,7 +6,7 @@ import (
 	"os"
 	"text/tabwriter"
 
-	"github.com/gabrifranca/cli-ping/model"
+	"github.com/gabrifranca/cli_ping/model"
 )
 
 // Colors ANSI
@@ -209,4 +209,3 @@ func truncate(s string, max int) string {
 	}
 	return s[:max-3] + "..."
 }
-
