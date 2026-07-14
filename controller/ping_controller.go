@@ -140,9 +140,11 @@ func (c *PingController) runPortScanMenu(scanner *bufio.Scanner) {
 	submenu := `  %s[ 1 ]%s Escanear porta em host remoto
   %s[ 2 ]%s Escanear portas locais (localhost)
   %s[ 3 ]%s Escanear dispositivos na rede WiFi
+  %s[ 4 ]%s Modo Promíscuo (Escuta Passiva)
   %s[ 0 ]%s Voltar
 `
 	fmt.Printf(submenu,
+		view.Yellow, view.Reset,
 		view.Yellow, view.Reset,
 		view.Yellow, view.Reset,
 		view.Yellow, view.Reset,
@@ -164,9 +166,38 @@ func (c *PingController) runPortScanMenu(scanner *bufio.Scanner) {
 		c.runLocalPortScan(scanner)
 	case "3":
 		c.runNetworkScan(scanner)
+	case "4":
+		c.runPromiscuousMode(scanner)
 	default:
 		c.printer.PrintError("Opção inválida.")
 	}
+}
+
+func (c *PingController) runPromiscuousMode(scanner *bufio.Scanner) {
+	fmt.Printf("\n  %s[!] AVISO:%s O Modo Promíscuo requer driver Npcap e privilégios de Administrador.\n", view.Yellow, view.Reset)
+	fmt.Printf("  %sDeseja iniciar a escuta passiva? (s/n):%s ", view.Bold, view.Reset)
+
+	if !scanner.Scan() {
+		return
+	}
+	input := strings.TrimSpace(scanner.Text())
+	input = strings.ToLower(input)
+	if input != "s" && input != "y" {
+		return
+	}
+
+	sniffer := service.NewSnifferService()
+	stopCh := make(chan struct{})
+
+	// Roda o sniffer em segundo plano
+	go sniffer.SniffNetwork(stopCh)
+
+	// Aguarda o usuário apertar Enter para cancelar
+	scanner.Scan()
+	close(stopCh)
+	
+	// Aguarda um instante para o sniffer terminar de printar
+	time.Sleep(200 * time.Millisecond)
 }
 
 func (c *PingController) runRemotePortScan(scanner *bufio.Scanner) {
