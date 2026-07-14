@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gabrifranca/cli-ping/model"
+	"github.com/gabrifranca/cli_ping/model"
 )
 
 // PingService handles the business logic for pinging endpoints.
