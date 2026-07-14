@@ -137,8 +137,41 @@ func (c *PingController) runPingMenu(scanner *bufio.Scanner) {
 
 func (c *PingController) runPortScanMenu(scanner *bufio.Scanner) {
 	fmt.Printf("\n  %s%s--- Port Scanner ---%s\n", view.Bold, view.Cyan, view.Reset)
-	fmt.Printf("  Digite o host e a porta (ex: google.com 443) ou 'voltar':\n")
+	submenu := `  %s[ 1 ]%s Escanear porta em host remoto
+  %s[ 2 ]%s Escanear portas locais (localhost)
+  %s[ 3 ]%s Escanear dispositivos na rede WiFi
+  %s[ 0 ]%s Voltar
+`
+	fmt.Printf(submenu,
+		view.Yellow, view.Reset,
+		view.Yellow, view.Reset,
+		view.Yellow, view.Reset,
+		view.Red, view.Reset,
+	)
 	fmt.Printf("  %s%sport >%s ", view.Bold, view.Green, view.Reset)
+
+	if !scanner.Scan() {
+		return
+	}
+	input := strings.TrimSpace(scanner.Text())
+
+	switch input {
+	case "0", "voltar":
+		return
+	case "1":
+		c.runRemotePortScan(scanner)
+	case "2":
+		c.runLocalPortScan(scanner)
+	case "3":
+		c.runNetworkScan(scanner)
+	default:
+		c.printer.PrintError("Opção inválida.")
+	}
+}
+
+func (c *PingController) runRemotePortScan(scanner *bufio.Scanner) {
+	fmt.Printf("\n  Digite o host e a porta (ex: google.com 443) ou 'voltar':\n")
+	fmt.Printf("  %s%sscan >%s ", view.Bold, view.Green, view.Reset)
 
 	if !scanner.Scan() {
 		return
@@ -163,6 +196,109 @@ func (c *PingController) runPortScanMenu(scanner *bufio.Scanner) {
 	} else {
 		fmt.Printf("  %s✗ Porta %d fechada/timeout.%s\n\n", view.Red, port, view.Reset)
 	}
+}
+
+func (c *PingController) runLocalPortScan(scanner *bufio.Scanner) {
+	fmt.Printf("\n  Range de portas (ex: 1 1024) ou 'all' para 1-65535:\n")
+	fmt.Printf("  %s%srange >%s ", view.Bold, view.Green, view.Reset)
+
+	if !scanner.Scan() {
+		return
+	}
+	input := strings.TrimSpace(scanner.Text())
+	if input == "" || input == "voltar" {
+		return
+	}
+
+	var start, end int
+	if input == "all" {
+		start, end = 1, 65535
+	} else {
+		n, _ := fmt.Sscanf(input, "%d %d", &start, &end)
+		if n != 2 || start < 1 || end > 65535 || start > end {
+			c.printer.PrintError("Range inválido. Use: <inicio> <fim> (ex: 1 1024)")
+			return
+		}
+	}
+
+	total := end - start + 1
+	c.printer.PrintInfo(fmt.Sprintf("Escaneando %d portas em localhost ...", total))
+
+	startTime := time.Now()
+	openPorts := c.extraService.LocalPortScan(start, end, 200)
+	elapsed := time.Since(startTime)
+
+	fmt.Println()
+	if len(openPorts) == 0 {
+		fmt.Printf("  %sNenhuma porta aberta encontrada.%s\n\n", view.Yellow, view.Reset)
+		return
+	}
+
+	for _, port := range openPorts {
+		name := service.PortNames[port]
+		if name != "" {
+			fmt.Printf("  %s✓ Porta %-5d (%s)%s\n", view.Green, port, name, view.Reset)
+		} else {
+			fmt.Printf("  %s✓ Porta %d%s\n", view.Green, port, view.Reset)
+		}
+	}
+
+	fmt.Printf("\n  %s%d porta(s) aberta(s) em %v%s\n\n",
+		view.White, len(openPorts), elapsed.Round(time.Millisecond), view.Reset)
+}
+
+func (c *PingController) runNetworkScan(scanner *bufio.Scanner) {
+	localIP, err := c.extraService.GetLocalIP()
+	if err != nil {
+		c.printer.PrintError(fmt.Sprintf("Erro ao detectar IP local: %v", err))
+		return
+	}
+
+	base := c.extraService.GetNetworkBase(localIP)
+	if base == "" {
+		c.printer.PrintError("Não foi possível determinar a rede.")
+		return
+	}
+
+	fmt.Printf("\n  %sSeu IP: %s%s\n", view.White, localIP, view.Reset)
+	fmt.Printf("  %sRede detectada: %s.0/24%s\n", view.White, base, view.Reset)
+	c.printer.PrintInfo(fmt.Sprintf("Escaneando 254 hosts com %d portas comuns ...\n", len(service.CommonPorts)))
+
+	startTime := time.Now()
+
+	onFound := func(host model.NetworkHost) {
+		portStrs := []string{}
+		for _, p := range host.OpenPorts {
+			name := service.PortNames[p]
+			if name != "" {
+				portStrs = append(portStrs, fmt.Sprintf("%d (%s)", p, name))
+			} else {
+				portStrs = append(portStrs, fmt.Sprintf("%d", p))
+			}
+		}
+
+		label := ""
+		if host.IP == localIP {
+			label = view.Cyan + " ← você" + view.Reset
+		} else if host.IP == base+".1" {
+			label = view.Cyan + " ← gateway" + view.Reset
+		}
+
+		fmt.Printf("  %s✓ %-15s%s │ Portas: %s%s\n",
+			view.Green, host.IP, view.Reset,
+			strings.Join(portStrs, ", "), label)
+	}
+
+	results := c.extraService.NetworkScan(base, service.CommonPorts, onFound)
+	elapsed := time.Since(startTime)
+
+	if len(results) == 0 {
+		fmt.Printf("\n  %sNenhum dispositivo encontrado.%s\n\n", view.Yellow, view.Reset)
+		return
+	}
+
+	fmt.Printf("\n  %s%d dispositivo(s) encontrado(s) em %v%s\n\n",
+		view.White, len(results), elapsed.Round(time.Millisecond), view.Reset)
 }
 
 func (c *PingController) runDNSMenu(scanner *bufio.Scanner) {
