@@ -36,3 +36,9 @@ func DefaultPingOptions() PingOptions {
 		ShowHeaders:     false,
 	}
 }
+
+// NetworkHost holds the result of scanning a single host on the network.
+type NetworkHost struct {
+	IP        string `json:"ip"`
+	OpenPorts []int  `json:"open_ports"`
+}
