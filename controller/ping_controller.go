@@ -7,33 +7,34 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gabrifranca/cli-ping/model"
-	"github.com/gabrifranca/cli-ping/service"
-	"github.com/gabrifranca/cli-ping/view"
+	"github.com/gabrifranca/cli_ping/model"
+	"github.com/gabrifranca/cli_ping/service"
+	"github.com/gabrifranca/cli_ping/view"
 )
 
 // PingController orchestrates the ping operations between service and view.
 type PingController struct {
-	service *service.PingService
-	printer *view.Printer
+	service      *service.PingService
+	extraService *service.ExtraService
+	printer      *view.Printer
 }
 
 // NewPingController creates a new PingController instance.
 func NewPingController() *PingController {
 	return &PingController{
-		service: service.NewPingService(),
-		printer: view.NewPrinter(),
+		service:      service.NewPingService(),
+		extraService: service.NewExtraService(),
+		printer:      view.NewPrinter(),
 	}
 }
 
 // RunInteractive starts the interactive REPL mode.
 func (c *PingController) RunInteractive() {
 	c.printer.PrintBanner()
-	c.printInteractiveHelp()
-
 	scanner := bufio.NewScanner(os.Stdin)
 
 	for {
+		c.printMainMenu()
 		fmt.Printf("  %s%sajin >%s ", view.Bold, view.Cyan, view.Reset)
 
 		if !scanner.Scan() {
@@ -41,80 +42,208 @@ func (c *PingController) RunInteractive() {
 		}
 
 		input := strings.TrimSpace(scanner.Text())
-
 		if input == "" {
 			continue
 		}
 
-		// Parse the input into tokens
-		tokens := strings.Fields(input)
-		command := strings.ToLower(tokens[0])
-
-		switch command {
-		case "exit", "quit", "q":
+		switch input {
+		case "0", "exit", "quit", "q":
 			fmt.Printf("\n  %s👋 Até mais!%s\n\n", view.Cyan, view.Reset)
 			return
-
-		case "help", "h":
-			c.printInteractiveHelp()
-
+		case "1":
+			c.runPingMenu(scanner)
+		case "2":
+			c.runPortScanMenu(scanner)
+		case "3":
+			c.runDNSMenu(scanner)
+		case "4":
+			c.runLoadTestMenu(scanner)
+		case "5":
+			c.runJWTMenu(scanner)
 		case "clear", "cls":
 			fmt.Print("\033[H\033[2J")
 			c.printer.PrintBanner()
-
-		case "ping":
-			if len(tokens) < 2 {
-				c.printer.PrintError("informe pelo menos uma URL. Ex: ping google.com")
-				continue
-			}
-			opts, urls, jsonOutput := c.parseFlags(tokens[1:])
-			c.executePing(urls, opts, jsonOutput)
-
-		case "check":
-			if len(tokens) < 2 {
-				c.printer.PrintError("informe uma URL. Ex: check google.com")
-				continue
-			}
-			opts := model.DefaultPingOptions()
-			result := c.service.CheckTLS(tokens[1], opts.Timeout)
-			c.printer.PrintResult(result)
-
 		default:
-			// Treat as a URL directly — the user just typed a URL
-			opts := model.DefaultPingOptions()
-			result := c.service.Ping(input, opts)
-			c.printer.PrintResult(result)
+			c.printer.PrintError("Opção inválida.")
 		}
 	}
 }
 
-// printInteractiveHelp shows the available commands in interactive mode.
-func (c *PingController) printInteractiveHelp() {
-	help := `  %s%sCOMANDOS DISPONÍVEIS:%s
+// printMainMenu shows the available commands in interactive mode.
+func (c *PingController) printMainMenu() {
+	menu := `  %s%sMENU PRINCIPAL:%s
   ──────────────────────────────────────────────────
-  %s<url>%s                        Ping direto em uma URL
-  %sping%s <url> [url2] [flags]    Ping com opções
-  %scheck%s <url>                  Verificar certificado TLS
-  %sclear%s                        Limpar a tela
-  %shelp%s                         Mostrar esta ajuda
-  %sexit%s                         Sair
-
-  %s%sFLAGS (para o comando ping):%s
-  -c <n>       Número de pings     -t <seg>     Timeout
-  -i <seg>     Intervalo           --json       Saída JSON
-  --no-follow  Não seguir redirects
+  %s[ 1 ]%s Ping / Verificação de TLS
+  %s[ 2 ]%s Port Scanner (TCP)
+  %s[ 3 ]%s Consulta DNS
+  %s[ 4 ]%s Load Testing (Stress Test HTTP)
+  %s[ 5 ]%s Decodificador JWT
+  %s[ 0 ]%s Sair
   ──────────────────────────────────────────────────
 `
-	fmt.Printf(help,
+	fmt.Printf(menu,
 		view.Bold, view.Cyan, view.Reset,
 		view.Yellow, view.Reset,
-		view.Green, view.Reset,
-		view.Green, view.Reset,
-		view.Green, view.Reset,
-		view.Green, view.Reset,
-		view.Green, view.Reset,
-		view.Bold, view.Cyan, view.Reset,
+		view.Yellow, view.Reset,
+		view.Yellow, view.Reset,
+		view.Yellow, view.Reset,
+		view.Yellow, view.Reset,
+		view.Red, view.Reset,
 	)
+}
+
+func (c *PingController) runPingMenu(scanner *bufio.Scanner) {
+	fmt.Printf("\n  %s%s--- Ping / TLS Check ---%s\n", view.Bold, view.Cyan, view.Reset)
+	fmt.Printf("  Digite a URL ou o comando (ex: ping google.com, check google.com) ou 'voltar':\n")
+	fmt.Printf("  %s%sping >%s ", view.Bold, view.Green, view.Reset)
+
+	if !scanner.Scan() {
+		return
+	}
+
+	input := strings.TrimSpace(scanner.Text())
+	if input == "" || input == "voltar" {
+		return
+	}
+
+	tokens := strings.Fields(input)
+	command := strings.ToLower(tokens[0])
+
+	switch command {
+	case "ping":
+		if len(tokens) < 2 {
+			c.printer.PrintError("informe pelo menos uma URL. Ex: ping google.com")
+			return
+		}
+		opts, urls, jsonOutput := c.parseFlags(tokens[1:])
+		c.executePing(urls, opts, jsonOutput)
+
+	case "check":
+		if len(tokens) < 2 {
+			c.printer.PrintError("informe uma URL. Ex: check google.com")
+			return
+		}
+		opts := model.DefaultPingOptions()
+		result := c.service.CheckTLS(tokens[1], opts.Timeout)
+		c.printer.PrintResult(result)
+
+	default:
+		// Treat as a URL directly
+		opts := model.DefaultPingOptions()
+		result := c.service.Ping(input, opts)
+		c.printer.PrintResult(result)
+	}
+}
+
+func (c *PingController) runPortScanMenu(scanner *bufio.Scanner) {
+	fmt.Printf("\n  %s%s--- Port Scanner ---%s\n", view.Bold, view.Cyan, view.Reset)
+	fmt.Printf("  Digite o host e a porta (ex: google.com 443) ou 'voltar':\n")
+	fmt.Printf("  %s%sport >%s ", view.Bold, view.Green, view.Reset)
+
+	if !scanner.Scan() {
+		return
+	}
+	input := strings.TrimSpace(scanner.Text())
+	if input == "" || input == "voltar" {
+		return
+	}
+
+	var host string
+	var port int
+	n, _ := fmt.Sscanf(input, "%s %d", &host, &port)
+	if n != 2 {
+		c.printer.PrintError("formato inválido. Use: <host> <porta>")
+		return
+	}
+
+	c.printer.PrintInfo(fmt.Sprintf("Escaneando porta %d em %s ...", port, host))
+	open := c.extraService.PortScan(host, port)
+	if open {
+		fmt.Printf("  %s✓ Porta %d aberta!%s\n\n", view.Green, port, view.Reset)
+	} else {
+		fmt.Printf("  %s✗ Porta %d fechada/timeout.%s\n\n", view.Red, port, view.Reset)
+	}
+}
+
+func (c *PingController) runDNSMenu(scanner *bufio.Scanner) {
+	fmt.Printf("\n  %s%s--- Consulta DNS ---%s\n", view.Bold, view.Cyan, view.Reset)
+	fmt.Printf("  Digite o host (ex: google.com) ou 'voltar':\n")
+	fmt.Printf("  %s%sdns >%s ", view.Bold, view.Green, view.Reset)
+
+	if !scanner.Scan() {
+		return
+	}
+	input := strings.TrimSpace(scanner.Text())
+	if input == "" || input == "voltar" {
+		return
+	}
+
+	c.printer.PrintInfo(fmt.Sprintf("Consultando IPs para %s ...", input))
+	ips, err := c.extraService.DNSLookup(input)
+	if err != nil {
+		c.printer.PrintError(fmt.Sprintf("Erro ao consultar DNS: %v", err))
+		return
+	}
+	for _, ip := range ips {
+		fmt.Printf("  %s- %s%s\n", view.White, ip, view.Reset)
+	}
+	fmt.Println()
+}
+
+func (c *PingController) runLoadTestMenu(scanner *bufio.Scanner) {
+	fmt.Printf("\n  %s%s--- Load Testing ---%s\n", view.Bold, view.Cyan, view.Reset)
+	fmt.Printf("  Digite a URL, quantidade de requisições e concorrência (ex: http://google.com 100 10) ou 'voltar':\n")
+	fmt.Printf("  %s%sload >%s ", view.Bold, view.Green, view.Reset)
+
+	if !scanner.Scan() {
+		return
+	}
+	input := strings.TrimSpace(scanner.Text())
+	if input == "" || input == "voltar" {
+		return
+	}
+
+	var url string
+	var reqs, conc int
+	n, _ := fmt.Sscanf(input, "%s %d %d", &url, &reqs, &conc)
+	if n != 3 {
+		c.printer.PrintError("formato inválido. Use: <url> <qtd> <concorrencia>")
+		return
+	}
+
+	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+		url = "https://" + url
+	}
+
+	c.printer.PrintInfo(fmt.Sprintf("Enviando %d requisições (%d simultâneas) para %s ...", reqs, conc, url))
+	success, failed, duration := c.extraService.LoadTest(url, reqs, conc)
+
+	fmt.Printf("  %sTempo Total: %v%s\n", view.White, duration, view.Reset)
+	fmt.Printf("  %sSucesso: %d%s\n", view.Green, success, view.Reset)
+	fmt.Printf("  %sFalha:   %d%s\n\n", view.Red, failed, view.Reset)
+}
+
+func (c *PingController) runJWTMenu(scanner *bufio.Scanner) {
+	fmt.Printf("\n  %s%s--- Decodificador JWT ---%s\n", view.Bold, view.Cyan, view.Reset)
+	fmt.Printf("  Cole o seu token JWT ou digite 'voltar':\n")
+	fmt.Printf("  %s%sjwt >%s ", view.Bold, view.Green, view.Reset)
+
+	if !scanner.Scan() {
+		return
+	}
+	input := strings.TrimSpace(scanner.Text())
+	if input == "" || input == "voltar" {
+		return
+	}
+
+	header, payload, err := c.extraService.DecodeJWT(input)
+	if err != nil {
+		c.printer.PrintError(fmt.Sprintf("Erro ao decodificar: %v", err))
+		return
+	}
+
+	fmt.Printf("\n  %s[Header]%s\n  %s\n", view.Cyan, view.Reset, header)
+	fmt.Printf("\n  %s[Payload]%s\n  %s\n\n", view.Cyan, view.Reset, payload)
 }
 
 // executePing runs the ping logic for interactive mode.
