@@ -17,10 +17,10 @@ type PingResult struct {
 
 // PingOptions holds the configuration for a ping request.
 type PingOptions struct {
-	Timeout    time.Duration
-	Method     string
-	Count      int
-	Interval   time.Duration
+	Timeout         time.Duration
+	Method          string
+	Count           int
+	Interval        time.Duration
 	FollowRedirects bool
 	ShowHeaders     bool
 }
