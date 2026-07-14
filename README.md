@@ -2,7 +2,7 @@
 
 **CLI para verificar o status de serviços e endpoints HTTP/HTTPS.**
 
-Ferramenta de linha de comando escrita em Go que realiza pings HTTP em endpoints, serviços e APIs — incluindo serviços hospedados no Render, Vercel, Railway, etc. — e relata seu status em tempo real com output colorido.
+Ferramenta de linha de comando escrita em Go que realiza pings HTTP em endpoints, serviços e APIs, relatando seu status em tempo real. Além disso, conta com um **Sniffer de Rede Integrado** capaz de analisar tráfego de pacotes, realizar OS Fingerprinting (via TTL) e monitorar consultas DNS locais.
 
 ## Arquitetura
 
@@ -14,7 +14,8 @@ CLI_PING/
 ├── model/
 │   └── ping_result.go              # Estruturas de dados (PingResult, PingOptions)
 ├── service/
-│   └── ping_service.go             # Lógica de negócio (HTTP requests, TLS check)
+│   ├── ping_service.go             # Lógica de negócio (HTTP requests, TLS check)
+│   └── sniffer_service.go          # Sniffer de rede, OS Fingerprinting, DNS monitor
 ├── controller/
 │   └── ping_controller.go          # Orquestração CLI, parsing de args, roteamento
 ├── view/
@@ -26,9 +27,9 @@ CLI_PING/
 
 | Camada         | Responsabilidade                                   |
 |----------------|---------------------------------------------------|
-| **Model**      | Define as estruturas `PingResult` e `PingOptions`  |
-| **Service**    | Executa HTTP requests, mede latência, verifica TLS |
-| **Controller** | Parseia argumentos CLI e roteia para os handlers   |
+| **Model**      | Define as estruturas de dados (`PingResult`, `PingOptions`) |
+| **Service**    | Executa HTTP requests, mede latência, intercepta pacotes (Sniffer) |
+| **Controller** | Parseia argumentos CLI, roteia para os handlers e controla o Menu Interativo |
 | **View**       | Formata e exibe resultados (cores, tabelas, JSON)  |
 
 ## Instalação
@@ -70,6 +71,14 @@ cli-ping ping --json https://my-service.onrender.com
 cli-ping check my-app.onrender.com
 ```
 
+### Escuta Passiva (Network Sniffer)
+Para utilizar a escuta de rede e visualizar tráfego, identificar Sistemas Operacionais via TTL e rastrear domínios visitados:
+```bash
+# Inicie o modo interativo (se implementado assim) ou via comando específico:
+cli-ping sniffer
+```
+*(Nota: Para utilizar o sniffer no Windows, é necessário ter o Npcap instalado e rodar o terminal como Administrador)*
+
 ## Flags
 
 | Flag                 | Descrição                              | Default |
@@ -99,7 +108,8 @@ cli-ping check my-app.onrender.com
 
 ## Tecnologias
 
-- **Go 1.26+** — Sem dependências externas
-- **`net/http`** — Requisições HTTP
-- **`crypto/tls`** — Verificação de certificados TLS
+- **Go 1.26+**
+- **`net/http`** & **`crypto/tls`** — Requisições HTTP e Verificação de certificados TLS
+- **`github.com/google/gopacket`** — Captura e análise profunda de pacotes (Deep Packet Inspection)
+- **Npcap / libpcap** — Dependência de sistema para captura de rede
 - **ANSI Colors** — Output colorido no terminal
