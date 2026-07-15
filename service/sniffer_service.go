@@ -127,10 +127,10 @@ func (s *SnifferService) SniffNetwork(stopCh chan struct{}) {
 	defer handle.Close()
 
 	// Recupera MAC e CIDR para a varredura ativa
-	srcMAC, cidr := s.getInterfaceDetails(deviceIP)
-	if srcMAC != nil && cidr != "" {
+	myMAC, cidr := s.getInterfaceDetails(deviceIP)
+	if myMAC != nil && cidr != "" {
 		fmt.Printf("  [*] Iniciando Varredura ARP Ativa em %s (Background)...\n", cidr)
-		go s.ActiveARPSweep(deviceName, srcMAC, net.ParseIP(deviceIP), cidr)
+		go s.ActiveARPSweep(deviceName, myMAC, net.ParseIP(deviceIP), cidr)
 	}
 
 	fmt.Println("  [*] Escutando todo o tráfego da rede (Modo Promíscuo)...")
@@ -185,6 +185,16 @@ func (s *SnifferService) SniffNetwork(stopCh chan struct{}) {
 				protocol = "ARP"
 				logs.DiscoveredHosts[srcIP] = srcMAC
 				extraInfo = "Protocolo de Resolução de Endereços (ARP)"
+
+				// --- INJECTION: Ping ativo para descobrir o TTL ---
+				// Quando descobrirmos a máquina via ARP, mandamos um Ping (se ainda não temos um TTL > 4)
+				if myMAC != nil {
+					targetIP := net.IP(arp.SourceProtAddress)
+					if currentTTL, exists := logs.HostTTL[targetIP.String()]; !exists || currentTTL <= 4 {
+						targetMAC := net.HardwareAddr(arp.SourceHwAddress)
+						go s.sendICMPEchoRequest(handle, myMAC, targetMAC, net.ParseIP(deviceIP), targetIP)
+					}
+				}
 			}
 
 			// 3. Camada de Rede (IPv4/IPv6)
@@ -531,6 +541,41 @@ func (s *SnifferService) sendARPRequest(handle *pcap.Handle, srcMAC net.Hardware
 	}
 	
 	if err := gopacket.SerializeLayers(buf, opts, &eth, &arp); err != nil {
+		return err
+	}
+
+	return handle.WritePacketData(buf.Bytes())
+}
+
+// sendICMPEchoRequest constrói e injeta um pacote ICMP Echo Request para extrair o TTL
+func (s *SnifferService) sendICMPEchoRequest(handle *pcap.Handle, srcMAC net.HardwareAddr, dstMAC net.HardwareAddr, srcIP net.IP, dstIP net.IP) error {
+	eth := layers.Ethernet{
+		SrcMAC:       srcMAC,
+		DstMAC:       dstMAC,
+		EthernetType: layers.EthernetTypeIPv4,
+	}
+
+	ipv4 := layers.IPv4{
+		Version:  4,
+		TTL:      64,
+		SrcIP:    srcIP,
+		DstIP:    dstIP,
+		Protocol: layers.IPProtocolICMPv4,
+	}
+
+	icmp := layers.ICMPv4{
+		TypeCode: layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
+		Id:       1337,
+		Seq:      1,
+	}
+
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{
+		FixLengths:       true,
+		ComputeChecksums: true,
+	}
+	
+	if err := gopacket.SerializeLayers(buf, opts, &eth, &ipv4, &icmp, gopacket.Payload([]byte("ajin_ping"))); err != nil {
 		return err
 	}
 
