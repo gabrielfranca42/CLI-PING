@@ -4,12 +4,14 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
+	manuf "github.com/timest/gomanuf"
 )
 
 type SnifferService struct{}
@@ -85,6 +87,13 @@ func (s *SnifferService) SniffNetwork(stopCh chan struct{}) {
 		return
 	}
 	defer handle.Close()
+
+	// Recupera MAC e CIDR para a varredura ativa
+	srcMAC, cidr := s.getInterfaceDetails(deviceIP)
+	if srcMAC != nil && cidr != "" {
+		fmt.Printf("  [*] Iniciando Varredura ARP Ativa em %s (Background)...\n", cidr)
+		go s.ActiveARPSweep(deviceName, srcMAC, net.ParseIP(deviceIP), cidr)
+	}
 
 	fmt.Println("  [*] Escutando todo o tráfego da rede (Modo Promíscuo)...")
 	fmt.Println("  [!] Pressione ENTER para encerrar a captura e gerar o RELATÓRIO DE ANÁLISE.")
@@ -231,7 +240,14 @@ func (s *SnifferService) SniffNetwork(stopCh chan struct{}) {
 
 			ttlInfo, macInfo := "", ""
 			if ttl > 0 { ttlInfo = fmt.Sprintf("[TTL:%d] ", ttl) }
-			if srcMAC != "" { macInfo = fmt.Sprintf("[%s] ", srcMAC) }
+			if srcMAC != "" {
+				vendor := manuf.Search(srcMAC)
+				if vendor != "" {
+					macInfo = fmt.Sprintf("[%s|%s] ", srcMAC, vendor)
+				} else {
+					macInfo = fmt.Sprintf("[%s] ", srcMAC)
+				}
+			}
 
 			fmt.Printf("  [>] %s%s%s -> %s%s [%s] %s%s\n", macInfo, srcIP, portInfoSrc, dstIP, portInfoDst, protocol, ttlInfo, extraInfo)
 		}
@@ -240,65 +256,193 @@ func (s *SnifferService) SniffNetwork(stopCh chan struct{}) {
 
 // analyzeLogs pega a estrutura preenchida durante a captura e emite um relatório analítico
 func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
-	fmt.Println("\n=========================================================================")
-	fmt.Println("                   RELATÓRIO DE ANÁLISE DE TRÁFEGO PASSIVO               ")
-	fmt.Println("=========================================================================")
-	fmt.Printf("  Volume Analisado: %d Pacotes | Tamanho Total: %.2f KB\n", logs.TotalPackets, float64(logs.TotalBytes)/1024.0)
+	var sb strings.Builder
+
+	sb.WriteString("\n=========================================================================\n")
+	sb.WriteString("                   RELATÓRIO DE ANÁLISE DE TRÁFEGO PASSIVO               \n")
+	sb.WriteString("=========================================================================\n")
+	sb.WriteString(fmt.Sprintf("  Volume Analisado: %d Pacotes | Tamanho Total: %.2f KB\n", logs.TotalPackets, float64(logs.TotalBytes)/1024.0))
 	
-	fmt.Println("\n  [+] Hosts Descobertos Fisicamente (Mapeamento IP -> MAC):")
+	sb.WriteString("\n  [+] Hosts Descobertos Fisicamente (Mapeamento IP -> MAC):\n")
 	if len(logs.DiscoveredHosts) > 0 {
 		for ip, mac := range logs.DiscoveredHosts {
 			if ip != "" && mac != "" {
-				fmt.Printf("      - IP: %-15s | MAC: %s\n", ip, mac)
+				vendor := manuf.Search(mac)
+				if vendor == "" { vendor = "Desconhecido" }
+				sb.WriteString(fmt.Sprintf("      - IP: %-15s | MAC: %-17s | Fabricante: %s\n", ip, mac, vendor))
 			}
 		}
 	} else {
-		fmt.Println("      Nenhum mapeamento IP/MAC encontrado na captura.")
+		sb.WriteString("      Nenhum mapeamento IP/MAC encontrado na captura.\n")
 	}
 
-	fmt.Println("\n  [+] Distribuição de Protocolos:")
+	sb.WriteString("\n  [+] Distribuição de Protocolos:\n")
 	if len(logs.ProtocolsCounter) > 0 {
 		for proto, count := range logs.ProtocolsCounter {
-			fmt.Printf("      - %-10s: %d pacotes\n", proto, count)
+			sb.WriteString(fmt.Sprintf("      - %-10s: %d pacotes\n", proto, count))
 		}
 	} else {
-		fmt.Println("      Nenhum protocolo reconhecido.")
+		sb.WriteString("      Nenhum protocolo reconhecido.\n")
 	}
 
-	fmt.Println("\n  [+] Rastreador de Acessos DNS (Quem acessou o quê):")
+	sb.WriteString("\n  [+] Rastreador de Acessos DNS (Quem acessou o quê):\n")
 	if len(logs.DNSQueries) > 0 {
 		for domain, ipCounts := range logs.DNSQueries {
-			fmt.Printf("      - Domínio: %s\n", domain)
+			sb.WriteString(fmt.Sprintf("      - Domínio: %s\n", domain))
 			for ip, count := range ipCounts {
 				// Tenta buscar o MAC do IP, se conhecermos
 				macStr := ""
 				if mac, exists := logs.DiscoveredHosts[ip]; exists && mac != "" {
-					macStr = fmt.Sprintf(" [MAC: %s]", mac)
+					vendor := manuf.Search(mac)
+					if vendor == "" { vendor = "Desconhecido" }
+					macStr = fmt.Sprintf(" [MAC: %s | Fab: %s]", mac, vendor)
 				}
-				fmt.Printf("          -> Requisitado por IP: %-15s %s (%d vezes)\n", ip, macStr, count)
+				sb.WriteString(fmt.Sprintf("          -> Requisitado por IP: %-15s %s (%d vezes)\n", ip, macStr, count))
 			}
 		}
 	} else {
-		fmt.Println("      Nenhuma consulta DNS interceptada.")
+		sb.WriteString("      Nenhuma consulta DNS interceptada.\n")
 	}
 
-	fmt.Println("\n  [+] Estatísticas de Conexões TCP (Flags):")
+	sb.WriteString("\n  [+] Estatísticas de Conexões TCP (Flags):\n")
 	for flag, count := range logs.TCPFlagsCounter {
-		fmt.Printf("      - %s: %d ocorrências\n", flag, count)
+		sb.WriteString(fmt.Sprintf("      - %s: %d ocorrências\n", flag, count))
 	}
 
-	fmt.Println("\n  [!] Análise Heurística de Segurança:")
+	sb.WriteString("\n  [!] Análise Heurística de Segurança:\n")
 	hasAlerts := false
 	for ip, synCount := range logs.SuspiciousIPs {
 		// Threshold: se houver mais de 5 tentativas de SYN a partir de um IP (rudimentar, mas ilustrativo)
 		if synCount > 5 { 
-			fmt.Printf("      [ALERTA] IP %s gerou %d pacotes SYN. Possível varredura de portas (SYN Flood / Scan)!\n", ip, synCount)
+			sb.WriteString(fmt.Sprintf("      [ALERTA] IP %s gerou %d pacotes SYN. Possível varredura de portas (SYN Flood / Scan)!\n", ip, synCount))
 			hasAlerts = true
 		}
 	}
 	if !hasAlerts {
-		fmt.Println("      Nenhum tráfego suspeito evidente (baseado em anomalias de handshake) foi detectado.")
+		sb.WriteString("      Nenhum tráfego suspeito evidente (baseado em anomalias de handshake) foi detectado.\n")
 	}
 	
-	fmt.Println("=========================================================================\n")
+	sb.WriteString("=========================================================================\n\n")
+
+	reportContent := sb.String()
+
+	// 1. Imprime no console para o usuário ver
+	fmt.Print(reportContent)
+
+	// 2. Salva em um arquivo .txt
+	filename := fmt.Sprintf("sniffer_report_%s.txt", time.Now().Format("20060102_150405"))
+	err := os.WriteFile(filename, []byte(reportContent), 0644)
+	if err != nil {
+		fmt.Printf("  [-] Erro ao salvar o relatório no arquivo: %v\n", err)
+	} else {
+		fmt.Printf("  [+] Relatório salvo com sucesso no arquivo: %s\n", filename)
+	}
+}
+
+// getInterfaceDetails busca o MAC e o CIDR baseados no IP descoberto
+func (s *SnifferService) getInterfaceDetails(targetIP string) (net.HardwareAddr, string) {
+	ifaces, err := net.Interfaces()
+	if err != nil { return nil, "" }
+	for _, iface := range ifaces {
+		addrs, err := iface.Addrs()
+		if err != nil { continue }
+		for _, addr := range addrs {
+			if ipnet, ok := addr.(*net.IPNet); ok {
+				if ipnet.IP.String() == targetIP {
+					return iface.HardwareAddr, ipnet.String()
+				}
+			}
+		}
+	}
+	return nil, ""
+}
+
+// ActiveARPSweep varre uma sub-rede enviando ARP Requests para cada IP.
+func (s *SnifferService) ActiveARPSweep(deviceName string, srcMAC net.HardwareAddr, srcIP net.IP, cidr string) {
+	handle, err := pcap.OpenLive(deviceName, 1600, true, pcap.BlockForever)
+	if err != nil {
+		return
+	}
+	defer handle.Close()
+
+	ip, ipNet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return
+	}
+
+	ips := s.generateIPList(ipNet)
+	
+	for _, targetIP := range ips {
+		if targetIP.Equal(ip) || targetIP.Equal(s.broadcastIP(ipNet)) {
+			continue
+		}
+
+		_ = s.sendARPRequest(handle, srcMAC, srcIP, targetIP)
+		time.Sleep(1 * time.Millisecond) // Evita DoS no switch
+	}
+}
+
+// sendARPRequest constrói e injeta o pacote ARP na rede
+func (s *SnifferService) sendARPRequest(handle *pcap.Handle, srcMAC net.HardwareAddr, srcIP net.IP, dstIP net.IP) error {
+	eth := layers.Ethernet{
+		SrcMAC:       srcMAC,
+		DstMAC:       net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
+		EthernetType: layers.EthernetTypeARP,
+	}
+
+	arp := layers.ARP{
+		AddrType:          layers.LinkTypeEthernet,
+		Protocol:          layers.EthernetTypeIPv4,
+		HwAddressSize:     6,
+		ProtAddressSize:   4,
+		Operation:         layers.ARPRequest,
+		SourceHwAddress:   []byte(srcMAC),
+		SourceProtAddress: []byte(srcIP.To4()),
+		DstHwAddress:      []byte{0, 0, 0, 0, 0, 0},
+		DstProtAddress:    []byte(dstIP.To4()),
+	}
+
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{
+		FixLengths:       true,
+		ComputeChecksums: true,
+	}
+	
+	if err := gopacket.SerializeLayers(buf, opts, &eth, &arp); err != nil {
+		return err
+	}
+
+	return handle.WritePacketData(buf.Bytes())
+}
+
+func (s *SnifferService) generateIPList(ipNet *net.IPNet) []net.IP {
+	var ips []net.IP
+	for ip := ipNet.IP.Mask(ipNet.Mask); ipNet.Contains(ip); s.incIP(ip) {
+		dup := make(net.IP, len(ip))
+		copy(dup, ip)
+		ips = append(ips, dup)
+	}
+	return ips
+}
+
+func (s *SnifferService) incIP(ip net.IP) {
+	for j := len(ip) - 1; j >= 0; j-- {
+		ip[j]++
+		if ip[j] > 0 {
+			break
+		}
+	}
+}
+
+func (s *SnifferService) broadcastIP(n *net.IPNet) net.IP {
+	var broadcast net.IP
+	if len(n.IP) == 4 {
+		broadcast = make(net.IP, 4)
+	} else {
+		broadcast = make(net.IP, 16)
+	}
+	for i := range broadcast {
+		broadcast[i] = n.IP[i] | ^n.Mask[i]
+	}
+	return broadcast
 }
