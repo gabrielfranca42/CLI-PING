@@ -32,6 +32,8 @@ type SnifferLogs struct {
 	ProtocolsCounter map[string]int               // Estatísticas de protocolos trafegados
 	HostTTL          map[string]uint8             // TTL observado por IP (para OS Fingerprinting)
 	HostOSByDNS      map[string]string            // OS detectado por Captive Portal DNS (IP -> "iOS/macOS", "Android", etc.)
+	HostNames        map[string]string            // Nomes amigáveis dos dispositivos (via mDNS/DHCP)
+	HostOSByDHCP     map[string]string            // OS detectado via Fingerprint de DHCP (Option 55)
 }
 
 // Domínios de Captive Portal conhecidos para detecção de SO
@@ -70,19 +72,25 @@ var captivePortalDomains = map[string]string{
 
 const devicesFile = "known_devices.json"
 
-func loadKnownDevices() map[string]string {
+type KnownDevice struct {
+	OS       string `json:"os"`
+	LastIP   string `json:"last_ip"`
+	Hostname string `json:"hostname"`
+}
+
+func loadKnownDevices() map[string]KnownDevice {
 	data, err := os.ReadFile(devicesFile)
 	if err != nil {
-		return make(map[string]string)
+		return make(map[string]KnownDevice)
 	}
-	var db map[string]string
+	var db map[string]KnownDevice
 	if err := json.Unmarshal(data, &db); err != nil {
-		return make(map[string]string)
+		return make(map[string]KnownDevice)
 	}
 	return db
 }
 
-func saveKnownDevices(db map[string]string) {
+func saveKnownDevices(db map[string]KnownDevice) {
 	data, _ := json.MarshalIndent(db, "", "  ")
 	_ = os.WriteFile(devicesFile, data, 0644)
 }
@@ -96,6 +104,8 @@ func NewSnifferLogs() *SnifferLogs {
 		ProtocolsCounter: make(map[string]int),
 		HostTTL:          make(map[string]uint8),
 		HostOSByDNS:      make(map[string]string),
+		HostNames:        make(map[string]string),
+		HostOSByDHCP:     make(map[string]string),
 	}
 }
 
@@ -279,6 +289,39 @@ func (s *SnifferService) SniffNetwork(stopCh chan struct{}) {
 				}
 			}
 
+			// Inspeção de DHCP (Estratégia 2)
+			if dhcpLayer := packet.Layer(layers.LayerTypeDHCPv4); dhcpLayer != nil {
+				dhcp, _ := dhcpLayer.(*layers.DHCPv4)
+				for _, opt := range dhcp.Options {
+					if opt.Type == layers.DHCPOptHostname {
+						logs.HostNames[srcIP] = string(opt.Data)
+					}
+					if opt.Type == layers.DHCPOptParamsRequest {
+						reqList := fmt.Sprintf("%v", opt.Data)
+						if strings.Contains(reqList, "44 46 47") || strings.Contains(reqList, "46 47 31") || strings.Contains(reqList, "249 252") || strings.Contains(reqList, "3 6 15 31 33") {
+							logs.HostOSByDHCP[srcIP] = "Windows"
+						} else if strings.Contains(reqList, "114 119 252") {
+							logs.HostOSByDHCP[srcIP] = "Apple iOS/macOS"
+						} else if strings.Contains(reqList, "26 28 51") || strings.Contains(reqList, "58 59") || strings.Contains(reqList, "1 3 6 15 26") {
+							logs.HostOSByDHCP[srcIP] = "Android"
+						}
+					}
+				}
+			}
+
+			// Inspeção de Payload bruto para mDNS / NetBIOS (Estratégia 1)
+			if appLayer := packet.ApplicationLayer(); appLayer != nil {
+				payload := string(appLayer.Payload())
+				if (dstPort == "5353" || dstPort == "137") && len(payload) > 5 {
+					// Extrai dicas de SO se estiver em texto claro
+					if strings.Contains(payload, "iPhone") { logs.HostOSByDNS[srcIP] = "iOS (Apple)" }
+					if strings.Contains(payload, "MacBook") || strings.Contains(payload, "Macmini") || strings.Contains(payload, "iMac") { logs.HostOSByDNS[srcIP] = "macOS (Apple)" }
+					if strings.Contains(payload, "iPad") { logs.HostOSByDNS[srcIP] = "iOS (Apple)" }
+					if strings.Contains(payload, "Android") || strings.Contains(payload, "_googlecast") { logs.HostOSByDNS[srcIP] = "Android" }
+					if strings.Contains(payload, "DESKTOP-") || strings.Contains(payload, "LAPTOP-") || strings.Contains(payload, "WORKGROUP") { logs.HostOSByDNS[srcIP] = "Windows" }
+				}
+			}
+
 			// 6. Camada de Aplicação (Consultas DNS / Monitoramento de acessos)
 			if dnsLayer := packet.Layer(layers.LayerTypeDNS); dnsLayer != nil {
 				dns, _ := dnsLayer.(*layers.DNS)
@@ -401,6 +444,9 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 	for ip := range logs.HostOSByDNS {
 		allIPs[ip] = true
 	}
+	for ip := range logs.HostOSByDHCP {
+		allIPs[ip] = true
+	}
 	for ip := range logs.HostTTL {
 		allIPs[ip] = true
 	}
@@ -410,7 +456,13 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 			var osDNS, osTTL string
 			var ttlVal uint8
 
-			// Técnica 3: OS via DNS Captive Portal
+			// Técnica 2: OS via DHCP
+			var osDHCP string
+			if os, exists := logs.HostOSByDHCP[ip]; exists {
+				osDHCP = os
+			}
+
+			// Técnica 3: OS via DNS Captive Portal / mDNS
 			if os, exists := logs.HostOSByDNS[ip]; exists {
 				osDNS = os
 			}
@@ -428,12 +480,15 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 				}
 			}
 
-			// Decide o veredito final (DNS tem prioridade, é mais preciso)
+			// Decide o veredito final (Hierarquia: DHCP > DNS/mDNS > TTL)
 			veredito := "Indeterminado"
 			metodo := ""
-			if osDNS != "" {
+			if osDHCP != "" {
+				veredito = osDHCP
+				metodo = "DHCP Fingerprint"
+			} else if osDNS != "" {
 				veredito = osDNS
-				metodo = "DNS Captive Portal"
+				metodo = "DNS / mDNS Payload"
 			} else if osTTL != "" {
 				veredito = osTTL
 				metodo = "TTL Fingerprint"
@@ -442,21 +497,44 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 			// Recupera o MAC
 			mac := logs.DiscoveredHosts[ip]
 
+			// Estratégia 4: Heurística de MAC (Aplicada se for Indeterminado ou TTL genérico)
+			if mac != "" && (veredito == "Indeterminado" || veredito == "Linux/Android/iOS/macOS (TTL base 64)") {
+				vendor := strings.ToLower(manuf.Search(mac))
+				if strings.Contains(vendor, "apple") {
+					veredito = "Apple iOS/macOS"
+					metodo = "Fabricante MAC + Heurística"
+				} else if strings.Contains(vendor, "samsung") || strings.Contains(vendor, "motorola") || strings.Contains(vendor, "xiaomi") {
+					veredito = "Android"
+					metodo = "Fabricante MAC + Heurística"
+				} else if strings.Contains(vendor, "intel") || strings.Contains(vendor, "dell") || strings.Contains(vendor, "hp") || strings.Contains(vendor, "lenovo") {
+					if ttlVal <= 64 {
+						veredito = "Windows/Linux PC"
+						metodo = "Fabricante MAC + Heurística"
+					}
+				}
+			}
+
 			// Lógica de Persistência (Banco de Dados JSON)
 			if mac != "" {
-				if knownOS, exists := knownDevices[mac]; exists {
+				if knownDev, exists := knownDevices[mac]; exists {
 					// Se já conhecíamos esse MAC, e a nova detecção é "Indeterminado" ou possivelmente falha (TTL baixo indicando Linux)
 					if veredito == "Indeterminado" || (metodo == "TTL Fingerprint" && strings.Contains(veredito, "Linux")) {
-						veredito = knownOS
+						veredito = knownDev.OS
 						metodo = "Persistência Local (BD)"
 					}
 				}
 
-				// Salva ou atualiza no BD se for um TTL confiável ou DNS
+				// Salva ou atualiza no BD se for um TTL confiável, DNS ou DHCP
 				if !strings.Contains(metodo, "BD") && veredito != "Indeterminado" {
-					if metodo == "DNS Captive Portal" || (metodo == "TTL Fingerprint" && ttlVal > 30) {
-						if knownDevices[mac] != veredito {
-							knownDevices[mac] = veredito
+					if metodo == "DNS Captive Portal" || metodo == "DNS / mDNS Payload" || metodo == "DHCP Fingerprint" || (metodo == "TTL Fingerprint" && ttlVal > 30) {
+						knownDev := knownDevices[mac]
+						if knownDev.OS != veredito || knownDev.LastIP != ip || knownDev.Hostname != logs.HostNames[ip] {
+							knownDev.OS = veredito
+							knownDev.LastIP = ip
+							if name, ok := logs.HostNames[ip]; ok && name != "" {
+								knownDev.Hostname = name
+							}
+							knownDevices[mac] = knownDev
 							dbUpdated = true
 						}
 					}
@@ -482,7 +560,13 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 				ttlStr = fmt.Sprintf(" | TTL: %d", ttlVal)
 			}
 
-			sb.WriteString(fmt.Sprintf("      - IP: %-15s | SO: %-30s | Método: %s%s%s\n", ip, veredito, metodo, ttlStr, macStr))
+			// Adiciona o Hostname amigável se descoberto
+			hostname := ""
+			if name, exists := logs.HostNames[ip]; exists && name != "" {
+				hostname = fmt.Sprintf("\n          -> Nome: %s", name)
+			}
+
+			sb.WriteString(fmt.Sprintf("      - IP: %-15s | SO: %-30s | Método: %s%s%s%s\n", ip, veredito, metodo, ttlStr, macStr, hostname))
 		}
 
 		if dbUpdated {
@@ -490,6 +574,38 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 		}
 	} else {
 		sb.WriteString("      Nenhuma impressão digital de SO capturada nesta sessão.\n")
+	}
+
+	sb.WriteString("\n  [+] Dispositivos Salvos no BD (Sinalização Offline ou Ausentes nesta captura):\n")
+	foundOffline := false
+	for mac, dev := range knownDevices {
+		// Verifica se o MAC já foi detectado nesta sessão atual
+		seenToday := false
+		for _, seenMac := range logs.DiscoveredHosts {
+			if seenMac == mac {
+				seenToday = true
+				break
+			}
+		}
+
+		if !seenToday {
+			foundOffline = true
+			vendor := manuf.Search(mac)
+			if vendor == "" {
+				vendor = "MAC Randomizado"
+			}
+			macStr := fmt.Sprintf(" | MAC: %s (%s)", mac, vendor)
+
+			hostname := ""
+			if dev.Hostname != "" {
+				hostname = fmt.Sprintf("\n          -> Nome Salvo: %s", dev.Hostname)
+			}
+
+			sb.WriteString(fmt.Sprintf("      - Último IP: %-15s | SO: %-30s | Método: Histórico do BD%s%s\n", dev.LastIP, dev.OS, macStr, hostname))
+		}
+	}
+	if !foundOffline {
+		sb.WriteString("      Todos os dispositivos conhecidos estão ativos nesta sessão ou o banco está vazio.\n")
 	}
 
 	sb.WriteString("\n  [!] Análise Heurística de Segurança:\n")
@@ -513,7 +629,7 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 	fmt.Print(reportContent)
 
 	// 2. Salva em um arquivo .txt
-	filename := fmt.Sprintf("sniffer_report_%s.txt", time.Now().Format("20060102_150405"))
+	filename := "log_rede.txt"
 	err := os.WriteFile(filename, []byte(reportContent), 0644)
 	if err != nil {
 		fmt.Printf("  [-] Erro ao salvar o relatório no arquivo: %v\n", err)
