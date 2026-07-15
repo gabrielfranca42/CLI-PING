@@ -29,6 +29,42 @@ type SnifferLogs struct {
 	TCPFlagsCounter  map[string]int               // Contagem de Flags TCP ("SYN", "FIN", etc.)
 	SuspiciousIPs    map[string]int               // Contagem de pacotes suspeitos por IP (Ex: potenciais SYN Scans)
 	ProtocolsCounter map[string]int               // Estatísticas de protocolos trafegados
+	HostTTL          map[string]uint8             // TTL observado por IP (para OS Fingerprinting)
+	HostOSByDNS      map[string]string            // OS detectado por Captive Portal DNS (IP -> "iOS/macOS", "Android", etc.)
+}
+
+// Domínios de Captive Portal conhecidos para detecção de SO
+var captivePortalDomains = map[string]string{
+	// Apple (iOS / macOS)
+	"captive.apple.com":                        "iOS/macOS (Apple)",
+	"www.apple.com":                             "iOS/macOS (Apple)",
+	"gsp1.apple.com":                            "iOS/macOS (Apple)",
+	"www.icloud.com":                            "iOS/macOS (Apple)",
+	"configuration.apple.com":                   "iOS/macOS (Apple)",
+	"gs-loc.apple.com":                          "iOS/macOS (Apple)",
+	"init.push.apple.com":                       "iOS/macOS (Apple)",
+	"courier.push.apple.com":                    "iOS/macOS (Apple)",
+	// Android / Google
+	"connectivitycheck.gstatic.com":              "Android (Google)",
+	"connectivitycheck.android.com":              "Android (Google)",
+	"clients3.google.com":                        "Android (Google)",
+	"play.googleapis.com":                        "Android (Google)",
+	"www.google.com":                             "Android (Google)",
+	// Samsung (Android)
+	"d.comenrz.net":                              "Android (Samsung)",
+	"samsungcloudsolution.com":                   "Android (Samsung)",
+	"samsungcloudsolution.net":                   "Android (Samsung)",
+	"config.samsungads.com":                      "Android (Samsung)",
+	// Microsoft Windows
+	"www.msftconnecttest.com":                    "Windows (Microsoft)",
+	"www.msftncsi.com":                           "Windows (Microsoft)",
+	"dns.msftncsi.com":                           "Windows (Microsoft)",
+	"ipv6.msftconnecttest.com":                   "Windows (Microsoft)",
+	"settings-win.data.microsoft.com":            "Windows (Microsoft)",
+	// Linux
+	"nmcheck.gnome.org":                          "Linux (GNOME)",
+	"network-test.debian.org":                    "Linux (Debian)",
+	"detectportal.firefox.com":                   "Linux/Firefox",
 }
 
 func NewSnifferLogs() *SnifferLogs {
@@ -38,6 +74,8 @@ func NewSnifferLogs() *SnifferLogs {
 		TCPFlagsCounter:  make(map[string]int),
 		SuspiciousIPs:    make(map[string]int),
 		ProtocolsCounter: make(map[string]int),
+		HostTTL:          make(map[string]uint8),
+		HostOSByDNS:      make(map[string]string),
 	}
 }
 
@@ -160,10 +198,13 @@ func (s *SnifferService) SniffNetwork(stopCh chan struct{}) {
 					continue
 				}
 
-				// Extrai o TTL para OS Fingerprinting
+				// Extrai o TTL para OS Fingerprinting e armazena por IP
 				if ipv4Layer := packet.Layer(layers.LayerTypeIPv4); ipv4Layer != nil {
 					ipv4, _ := ipv4Layer.(*layers.IPv4)
 					ttl = ipv4.TTL
+					if srcIP != "" && ttl > 0 {
+						logs.HostTTL[srcIP] = ttl
+					}
 				}
 				
 				// Associa IP ao MAC descoberto
@@ -219,6 +260,14 @@ func (s *SnifferService) SniffNetwork(stopCh chan struct{}) {
 					}
 					// Incrementa a contagem para o IP de origem específico
 					logs.DNSQueries[dnsQuery][srcIP]++
+
+					// Técnica 3: Detecção de OS via Captive Portal DNS
+					dnsLower := strings.ToLower(dnsQuery)
+					if detectedOS, match := captivePortalDomains[dnsLower]; match {
+						if srcIP != "" {
+							logs.HostOSByDNS[srcIP] = detectedOS
+						}
+					}
 				}
 			}
 
@@ -307,6 +356,77 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 	sb.WriteString("\n  [+] Estatísticas de Conexões TCP (Flags):\n")
 	for flag, count := range logs.TCPFlagsCounter {
 		sb.WriteString(fmt.Sprintf("      - %s: %d ocorrências\n", flag, count))
+	}
+
+	// Seção de OS Fingerprinting (Técnicas 3 e 4 combinadas)
+	sb.WriteString("\n  [+] OS Fingerprinting (Identificação de Dispositivos Desconhecidos):\n")
+	
+	// Coleta todos os IPs únicos que temos alguma informação de OS
+	allIPs := make(map[string]bool)
+	for ip := range logs.HostOSByDNS {
+		allIPs[ip] = true
+	}
+	for ip := range logs.HostTTL {
+		allIPs[ip] = true
+	}
+
+	if len(allIPs) > 0 {
+		for ip := range allIPs {
+			var osDNS, osTTL string
+			var ttlVal uint8
+
+			// Técnica 3: OS via DNS Captive Portal
+			if os, exists := logs.HostOSByDNS[ip]; exists {
+				osDNS = os
+			}
+
+			// Técnica 4: OS via TTL Fingerprinting
+			if t, exists := logs.HostTTL[ip]; exists {
+				ttlVal = t
+				switch {
+				case t >= 1 && t <= 64:
+					osTTL = "Linux/Android/iOS/macOS (TTL base 64)"
+				case t >= 65 && t <= 128:
+					osTTL = "Windows (TTL base 128)"
+				case t >= 129 && t <= 255:
+					osTTL = "Roteador/Switch/Equipamento de Rede (TTL base 255)"
+				}
+			}
+
+			// Decide o veredito final (DNS tem prioridade, é mais preciso)
+			veredito := "Indeterminado"
+			metodo := ""
+			if osDNS != "" {
+				veredito = osDNS
+				metodo = "DNS Captive Portal"
+			} else if osTTL != "" {
+				veredito = osTTL
+				metodo = "TTL Fingerprint"
+			}
+
+			if veredito == "Indeterminado" {
+				continue
+			}
+
+			// Complementa com MAC se disponível
+			macStr := ""
+			if mac, exists := logs.DiscoveredHosts[ip]; exists && mac != "" {
+				vendor := manuf.Search(mac)
+				if vendor == "" {
+					vendor = "MAC Randomizado"
+				}
+				macStr = fmt.Sprintf(" | MAC: %s (%s)", mac, vendor)
+			}
+
+			ttlStr := ""
+			if ttlVal > 0 {
+				ttlStr = fmt.Sprintf(" | TTL: %d", ttlVal)
+			}
+
+			sb.WriteString(fmt.Sprintf("      - IP: %-15s | SO: %-30s | Método: %s%s%s\n", ip, veredito, metodo, ttlStr, macStr))
+		}
+	} else {
+		sb.WriteString("      Nenhuma impressão digital de SO capturada nesta sessão.\n")
 	}
 
 	sb.WriteString("\n  [!] Análise Heurística de Segurança:\n")
