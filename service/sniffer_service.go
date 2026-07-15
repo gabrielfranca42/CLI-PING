@@ -203,7 +203,9 @@ func (s *SnifferService) SniffNetwork(stopCh chan struct{}) {
 					ipv4, _ := ipv4Layer.(*layers.IPv4)
 					ttl = ipv4.TTL
 					if srcIP != "" && ttl > 0 {
-						logs.HostTTL[srcIP] = ttl
+						if currentTTL, exists := logs.HostTTL[srcIP]; !exists || ttl > currentTTL {
+							logs.HostTTL[srcIP] = ttl
+						}
 					}
 				}
 				
