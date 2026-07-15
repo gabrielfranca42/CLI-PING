@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -25,49 +26,50 @@ func NewSnifferService() *SnifferService {
 type SnifferLogs struct {
 	TotalPackets     int
 	TotalBytes       int
-	DiscoveredHosts  map[string]string            // Mapeamento de IP para Endereço MAC
-	DNSQueries       map[string]map[string]int    // Domínio -> IP Solicitante -> Contagem
-	TCPFlagsCounter  map[string]int               // Contagem de Flags TCP ("SYN", "FIN", etc.)
-	SuspiciousIPs    map[string]int               // Contagem de pacotes suspeitos por IP (Ex: potenciais SYN Scans)
-	ProtocolsCounter map[string]int               // Estatísticas de protocolos trafegados
-	HostTTL          map[string]uint8             // TTL observado por IP (para OS Fingerprinting)
-	HostOSByDNS      map[string]string            // OS detectado por Captive Portal DNS (IP -> "iOS/macOS", "Android", etc.)
-	HostNames        map[string]string            // Nomes amigáveis dos dispositivos (via mDNS/DHCP)
-	HostOSByDHCP     map[string]string            // OS detectado via Fingerprint de DHCP (Option 55)
+	DiscoveredHosts  map[string]string         // Mapeamento de IP para Endereço MAC
+	DNSQueries       map[string]map[string]int // Domínio -> IP Solicitante -> Contagem
+	TCPFlagsCounter  map[string]int            // Contagem de Flags TCP ("SYN", "FIN", etc.)
+	SuspiciousIPs    map[string]int            // Contagem de pacotes suspeitos por IP (Ex: potenciais SYN Scans)
+	ProtocolsCounter map[string]int            // Estatísticas de protocolos trafegados
+	HostTTL          map[string]uint8          // TTL observado por IP (para OS Fingerprinting)
+	HostOSByDNS      map[string]string         // OS detectado por Captive Portal DNS (IP -> "iOS/macOS", "Android", etc.)
+	HostNames        map[string]string         // Nomes amigáveis dos dispositivos (via mDNS/DHCP)
+	HostOSByDHCP     map[string]string         // OS detectado via Fingerprint de DHCP (Option 55)
+	HostAccesses     map[string]map[string]int // IP -> Domínio -> Contagem de Acessos
 }
 
 // Domínios de Captive Portal conhecidos para detecção de SO
 var captivePortalDomains = map[string]string{
 	// Apple (iOS / macOS)
-	"captive.apple.com":                        "iOS/macOS (Apple)",
-	"www.apple.com":                             "iOS/macOS (Apple)",
-	"gsp1.apple.com":                            "iOS/macOS (Apple)",
-	"www.icloud.com":                            "iOS/macOS (Apple)",
-	"configuration.apple.com":                   "iOS/macOS (Apple)",
-	"gs-loc.apple.com":                          "iOS/macOS (Apple)",
-	"init.push.apple.com":                       "iOS/macOS (Apple)",
-	"courier.push.apple.com":                    "iOS/macOS (Apple)",
+	"captive.apple.com":       "iOS/macOS (Apple)",
+	"www.apple.com":           "iOS/macOS (Apple)",
+	"gsp1.apple.com":          "iOS/macOS (Apple)",
+	"www.icloud.com":          "iOS/macOS (Apple)",
+	"configuration.apple.com": "iOS/macOS (Apple)",
+	"gs-loc.apple.com":        "iOS/macOS (Apple)",
+	"init.push.apple.com":     "iOS/macOS (Apple)",
+	"courier.push.apple.com":  "iOS/macOS (Apple)",
 	// Android / Google
-	"connectivitycheck.gstatic.com":              "Android (Google)",
-	"connectivitycheck.android.com":              "Android (Google)",
-	"clients3.google.com":                        "Android (Google)",
-	"play.googleapis.com":                        "Android (Google)",
-	"www.google.com":                             "Android (Google)",
+	"connectivitycheck.gstatic.com": "Android (Google)",
+	"connectivitycheck.android.com": "Android (Google)",
+	"clients3.google.com":           "Android (Google)",
+	"play.googleapis.com":           "Android (Google)",
+	"www.google.com":                "Android (Google)",
 	// Samsung (Android)
-	"d.comenrz.net":                              "Android (Samsung)",
-	"samsungcloudsolution.com":                   "Android (Samsung)",
-	"samsungcloudsolution.net":                   "Android (Samsung)",
-	"config.samsungads.com":                      "Android (Samsung)",
+	"d.comenrz.net":            "Android (Samsung)",
+	"samsungcloudsolution.com": "Android (Samsung)",
+	"samsungcloudsolution.net": "Android (Samsung)",
+	"config.samsungads.com":    "Android (Samsung)",
 	// Microsoft Windows
-	"www.msftconnecttest.com":                    "Windows (Microsoft)",
-	"www.msftncsi.com":                           "Windows (Microsoft)",
-	"dns.msftncsi.com":                           "Windows (Microsoft)",
-	"ipv6.msftconnecttest.com":                   "Windows (Microsoft)",
-	"settings-win.data.microsoft.com":            "Windows (Microsoft)",
+	"www.msftconnecttest.com":         "Windows (Microsoft)",
+	"www.msftncsi.com":                "Windows (Microsoft)",
+	"dns.msftncsi.com":                "Windows (Microsoft)",
+	"ipv6.msftconnecttest.com":        "Windows (Microsoft)",
+	"settings-win.data.microsoft.com": "Windows (Microsoft)",
 	// Linux
-	"nmcheck.gnome.org":                          "Linux (GNOME)",
-	"network-test.debian.org":                    "Linux (Debian)",
-	"detectportal.firefox.com":                   "Linux/Firefox",
+	"nmcheck.gnome.org":        "Linux (GNOME)",
+	"network-test.debian.org":  "Linux (Debian)",
+	"detectportal.firefox.com": "Linux/Firefox",
 }
 
 const devicesFile = "known_devices.json"
@@ -106,6 +108,7 @@ func NewSnifferLogs() *SnifferLogs {
 		HostOSByDNS:      make(map[string]string),
 		HostNames:        make(map[string]string),
 		HostOSByDHCP:     make(map[string]string),
+		HostAccesses:     make(map[string]map[string]int),
 	}
 }
 
@@ -163,6 +166,14 @@ func (s *SnifferService) SniffNetwork(stopCh chan struct{}) {
 		go s.ActiveARPSweep(deviceName, myMAC, net.ParseIP(deviceIP), cidr)
 	}
 
+	// Calcula o IP de broadcast da sub-rede dinamicamente
+	var broadcastAddr string
+	if cidr != "" {
+		if _, ipNet, err := net.ParseCIDR(cidr); err == nil {
+			broadcastAddr = s.broadcastIP(ipNet).String()
+		}
+	}
+
 	fmt.Println("  [*] Escutando todo o tráfego da rede (Modo Promíscuo)...")
 	fmt.Println("  [!] Pressione ENTER para encerrar a captura e gerar o RELATÓRIO DE ANÁLISE.")
 
@@ -182,7 +193,7 @@ func (s *SnifferService) SniffNetwork(stopCh chan struct{}) {
 			}
 
 			packet := gopacket.NewPacket(data, handle.LinkType(), gopacket.Default)
-			
+
 			// Incrementa estatísticas gerais
 			logs.TotalPackets++
 			logs.TotalBytes += len(data)
@@ -206,7 +217,7 @@ func (s *SnifferService) SniffNetwork(stopCh chan struct{}) {
 				arp, _ := arpLayer.(*layers.ARP)
 				srcIP = net.IP(arp.SourceProtAddress).String()
 				dstIP = net.IP(arp.DstProtAddress).String()
-				
+
 				// Ignora tráfego do nosso próprio IP
 				if srcIP == deviceIP || dstIP == deviceIP {
 					continue
@@ -234,7 +245,7 @@ func (s *SnifferService) SniffNetwork(stopCh chan struct{}) {
 				protocol = netLayer.LayerType().String()
 
 				// Filtro para ignorar IP ruidoso (Broadcast local) e a própria máquina
-				if srcIP == "172.26.33.255" || dstIP == "172.26.33.255" || srcIP == deviceIP || dstIP == deviceIP {
+				if srcIP == deviceIP || dstIP == deviceIP || srcIP == broadcastAddr || dstIP == broadcastAddr || srcIP == "255.255.255.255" || dstIP == "255.255.255.255" {
 					continue
 				}
 
@@ -248,7 +259,7 @@ func (s *SnifferService) SniffNetwork(stopCh chan struct{}) {
 						}
 					}
 				}
-				
+
 				// Associa IP ao MAC descoberto
 				if srcIP != "" && srcMAC != "" {
 					logs.DiscoveredHosts[srcIP] = srcMAC
@@ -271,13 +282,31 @@ func (s *SnifferService) SniffNetwork(stopCh chan struct{}) {
 				if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
 					tcp, _ := tcpLayer.(*layers.TCP)
 					var flags []string
-					if tcp.SYN { flags = append(flags, "SYN"); logs.TCPFlagsCounter["SYN"]++ }
-					if tcp.ACK { flags = append(flags, "ACK"); logs.TCPFlagsCounter["ACK"]++ }
-					if tcp.FIN { flags = append(flags, "FIN"); logs.TCPFlagsCounter["FIN"]++ }
-					if tcp.RST { flags = append(flags, "RST"); logs.TCPFlagsCounter["RST"]++ }
-					if tcp.PSH { flags = append(flags, "PSH"); logs.TCPFlagsCounter["PSH"]++ }
-					if tcp.URG { flags = append(flags, "URG"); logs.TCPFlagsCounter["URG"]++ }
-					
+					if tcp.SYN {
+						flags = append(flags, "SYN")
+						logs.TCPFlagsCounter["SYN"]++
+					}
+					if tcp.ACK {
+						flags = append(flags, "ACK")
+						logs.TCPFlagsCounter["ACK"]++
+					}
+					if tcp.FIN {
+						flags = append(flags, "FIN")
+						logs.TCPFlagsCounter["FIN"]++
+					}
+					if tcp.RST {
+						flags = append(flags, "RST")
+						logs.TCPFlagsCounter["RST"]++
+					}
+					if tcp.PSH {
+						flags = append(flags, "PSH")
+						logs.TCPFlagsCounter["PSH"]++
+					}
+					if tcp.URG {
+						flags = append(flags, "URG")
+						logs.TCPFlagsCounter["URG"]++
+					}
+
 					if len(flags) > 0 {
 						extraInfo += fmt.Sprintf("[Flags: %s] ", strings.Join(flags, ","))
 					}
@@ -285,6 +314,34 @@ func (s *SnifferService) SniffNetwork(stopCh chan struct{}) {
 					// Heurística de Segurança: Detecta possível SYN Scan (Muitos pacotes SYN sem ACK)
 					if tcp.SYN && !tcp.ACK {
 						logs.SuspiciousIPs[srcIP]++
+					}
+
+					// Captura SNI em conexões HTTPS
+					if dstPort == "443" && len(tcp.Payload) > 0 {
+						sni := parseTLSSNI(tcp.Payload)
+						if sni != "" {
+							extraInfo += fmt.Sprintf("[SNI HTTPS: %s] ", sni)
+							if srcIP != "" {
+								if logs.HostAccesses[srcIP] == nil {
+									logs.HostAccesses[srcIP] = make(map[string]int)
+								}
+								logs.HostAccesses[srcIP][sni]++
+							}
+						}
+					}
+
+					// Captura Host em conexões HTTP
+					if dstPort == "80" && len(tcp.Payload) > 0 {
+						host := parseHTTPHost(tcp.Payload)
+						if host != "" {
+							extraInfo += fmt.Sprintf("[HTTP Host: %s] ", host)
+							if srcIP != "" {
+								if logs.HostAccesses[srcIP] == nil {
+									logs.HostAccesses[srcIP] = make(map[string]int)
+								}
+								logs.HostAccesses[srcIP][host]++
+							}
+						}
 					}
 				}
 			}
@@ -314,11 +371,21 @@ func (s *SnifferService) SniffNetwork(stopCh chan struct{}) {
 				payload := string(appLayer.Payload())
 				if (dstPort == "5353" || dstPort == "137") && len(payload) > 5 {
 					// Extrai dicas de SO se estiver em texto claro
-					if strings.Contains(payload, "iPhone") { logs.HostOSByDNS[srcIP] = "iOS (Apple)" }
-					if strings.Contains(payload, "MacBook") || strings.Contains(payload, "Macmini") || strings.Contains(payload, "iMac") { logs.HostOSByDNS[srcIP] = "macOS (Apple)" }
-					if strings.Contains(payload, "iPad") { logs.HostOSByDNS[srcIP] = "iOS (Apple)" }
-					if strings.Contains(payload, "Android") || strings.Contains(payload, "_googlecast") { logs.HostOSByDNS[srcIP] = "Android" }
-					if strings.Contains(payload, "DESKTOP-") || strings.Contains(payload, "LAPTOP-") || strings.Contains(payload, "WORKGROUP") { logs.HostOSByDNS[srcIP] = "Windows" }
+					if strings.Contains(payload, "iPhone") {
+						logs.HostOSByDNS[srcIP] = "iOS (Apple)"
+					}
+					if strings.Contains(payload, "MacBook") || strings.Contains(payload, "Macmini") || strings.Contains(payload, "iMac") {
+						logs.HostOSByDNS[srcIP] = "macOS (Apple)"
+					}
+					if strings.Contains(payload, "iPad") {
+						logs.HostOSByDNS[srcIP] = "iOS (Apple)"
+					}
+					if strings.Contains(payload, "Android") || strings.Contains(payload, "_googlecast") {
+						logs.HostOSByDNS[srcIP] = "Android"
+					}
+					if strings.Contains(payload, "DESKTOP-") || strings.Contains(payload, "LAPTOP-") || strings.Contains(payload, "WORKGROUP") {
+						logs.HostOSByDNS[srcIP] = "Windows"
+					}
 				}
 			}
 
@@ -328,13 +395,21 @@ func (s *SnifferService) SniffNetwork(stopCh chan struct{}) {
 				if dns.OpCode == layers.DNSOpCodeQuery && len(dns.Questions) > 0 {
 					dnsQuery := string(dns.Questions[0].Name)
 					extraInfo += fmt.Sprintf("[Consulta DNS: %s] ", dnsQuery)
-					
+
 					// Verifica se o mapa interno para este domínio já existe
 					if logs.DNSQueries[dnsQuery] == nil {
 						logs.DNSQueries[dnsQuery] = make(map[string]int)
 					}
 					// Incrementa a contagem para o IP de origem específico
 					logs.DNSQueries[dnsQuery][srcIP]++
+
+					// Adiciona nos acessos do host
+					if srcIP != "" {
+						if logs.HostAccesses[srcIP] == nil {
+							logs.HostAccesses[srcIP] = make(map[string]int)
+						}
+						logs.HostAccesses[srcIP][dnsQuery]++
+					}
 
 					// Técnica 3: Detecção de OS via Captive Portal DNS
 					dnsLower := strings.ToLower(dnsQuery)
@@ -359,11 +434,17 @@ func (s *SnifferService) SniffNetwork(stopCh chan struct{}) {
 
 			// Formatação Visual em tempo real
 			portInfoSrc, portInfoDst := "", ""
-			if srcPort != "" { portInfoSrc = ":" + srcPort }
-			if dstPort != "" { portInfoDst = ":" + dstPort }
+			if srcPort != "" {
+				portInfoSrc = ":" + srcPort
+			}
+			if dstPort != "" {
+				portInfoDst = ":" + dstPort
+			}
 
 			ttlInfo, macInfo := "", ""
-			if ttl > 0 { ttlInfo = fmt.Sprintf("[TTL:%d] ", ttl) }
+			if ttl > 0 {
+				ttlInfo = fmt.Sprintf("[TTL:%d] ", ttl)
+			}
 			if srcMAC != "" {
 				vendor := manuf.Search(srcMAC)
 				if vendor != "" {
@@ -386,13 +467,15 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 	sb.WriteString("                   RELATÓRIO DE ANÁLISE DE TRÁFEGO PASSIVO               \n")
 	sb.WriteString("=========================================================================\n")
 	sb.WriteString(fmt.Sprintf("  Volume Analisado: %d Pacotes | Tamanho Total: %.2f KB\n", logs.TotalPackets, float64(logs.TotalBytes)/1024.0))
-	
+
 	sb.WriteString("\n  [+] Hosts Descobertos Fisicamente (Mapeamento IP -> MAC):\n")
 	if len(logs.DiscoveredHosts) > 0 {
 		for ip, mac := range logs.DiscoveredHosts {
 			if ip != "" && mac != "" {
 				vendor := manuf.Search(mac)
-				if vendor == "" { vendor = "Desconhecido" }
+				if vendor == "" {
+					vendor = "Desconhecido"
+				}
 				sb.WriteString(fmt.Sprintf("      - IP: %-15s | MAC: %-17s | Fabricante: %s\n", ip, mac, vendor))
 			}
 		}
@@ -418,7 +501,9 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 				macStr := ""
 				if mac, exists := logs.DiscoveredHosts[ip]; exists && mac != "" {
 					vendor := manuf.Search(mac)
-					if vendor == "" { vendor = "Desconhecido" }
+					if vendor == "" {
+						vendor = "Desconhecido"
+					}
 					macStr = fmt.Sprintf(" [MAC: %s | Fab: %s]", mac, vendor)
 				}
 				sb.WriteString(fmt.Sprintf("          -> Requisitado por IP: %-15s %s (%d vezes)\n", ip, macStr, count))
@@ -435,11 +520,11 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 
 	// Seção de OS Fingerprinting (Técnicas 3 e 4 combinadas)
 	sb.WriteString("\n  [+] OS Fingerprinting (Identificação de Dispositivos Desconhecidos):\n")
-	
+
 	knownDevices := loadKnownDevices()
 	dbUpdated := false
 
-	// Coleta todos os IPs únicos que temos alguma informação de OS
+	// Coleta todos os IPs únicos que temos alguma informação de OS ou tráfego
 	allIPs := make(map[string]bool)
 	for ip := range logs.HostOSByDNS {
 		allIPs[ip] = true
@@ -450,6 +535,16 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 	for ip := range logs.HostTTL {
 		allIPs[ip] = true
 	}
+	for ip := range logs.HostAccesses {
+		allIPs[ip] = true
+	}
+
+	// Inicializa o StringBuilder para o log_https.txt
+	var httpsSB strings.Builder
+	httpsSB.WriteString("=========================================================================\n")
+	httpsSB.WriteString("         MAPEAMENTO DE ACESSOS E DISPOSITIVOS DETECTADOS (HTTPS/DNS)      \n")
+	httpsSB.WriteString("=========================================================================\n")
+	httpsSB.WriteString(fmt.Sprintf("  Gerado em: %s\n\n", time.Now().Format("02/01/2006 15:04:05")))
 
 	if len(allIPs) > 0 {
 		for ip := range allIPs {
@@ -541,6 +636,58 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 				}
 			}
 
+			// Escreve os detalhes no log_https.txt mesmo se veredito for Indeterminado
+			vereditoExibido := veredito
+			if vereditoExibido == "Indeterminado" {
+				vereditoExibido = "Desconhecido"
+			}
+			metodoExibido := metodo
+			if metodoExibido == "" {
+				metodoExibido = "Não determinado"
+			}
+
+			httpsSB.WriteString("-------------------------------------------------------------------------\n")
+			hostnameLabel := ""
+			if name, ok := logs.HostNames[ip]; ok && name != "" {
+				hostnameLabel = fmt.Sprintf(" (%s)", name)
+			}
+			httpsSB.WriteString(fmt.Sprintf("MÁQUINA: %s%s\n", ip, hostnameLabel))
+			httpsSB.WriteString("-------------------------------------------------------------------------\n")
+			httpsSB.WriteString(fmt.Sprintf("  - IP:                  %s\n", ip))
+
+			if mac != "" {
+				vendor := manuf.Search(mac)
+				if vendor == "" {
+					vendor = "Desconhecido"
+				}
+				httpsSB.WriteString(fmt.Sprintf("  - MAC:                 %s (%s)\n", mac, vendor))
+			} else {
+				httpsSB.WriteString("  - MAC:                 Não detectado\n")
+			}
+			httpsSB.WriteString(fmt.Sprintf("  - Sistema Operacional: %s [Método: %s]\n", vereditoExibido, metodoExibido))
+			httpsSB.WriteString("  - Destinos Acessados:\n")
+
+			accesses := logs.HostAccesses[ip]
+			if len(accesses) > 0 {
+				type domainCount struct {
+					domain string
+					count  int
+				}
+				var sortedAccesses []domainCount
+				for dom, count := range accesses {
+					sortedAccesses = append(sortedAccesses, domainCount{dom, count})
+				}
+				sort.Slice(sortedAccesses, func(i, j int) bool {
+					return sortedAccesses[i].count > sortedAccesses[j].count
+				})
+				for _, entry := range sortedAccesses {
+					httpsSB.WriteString(fmt.Sprintf("      * %-50s (%d acessos)\n", entry.domain, entry.count))
+				}
+			} else {
+				httpsSB.WriteString("      Nenhum destino capturado nesta sessão.\n")
+			}
+			httpsSB.WriteString("\n")
+
 			if veredito == "Indeterminado" {
 				continue
 			}
@@ -612,7 +759,7 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 	hasAlerts := false
 	for ip, synCount := range logs.SuspiciousIPs {
 		// Threshold: se houver mais de 5 tentativas de SYN a partir de um IP (rudimentar, mas ilustrativo)
-		if synCount > 5 { 
+		if synCount > 5 {
 			sb.WriteString(fmt.Sprintf("      [ALERTA] IP %s gerou %d pacotes SYN. Possível varredura de portas (SYN Flood / Scan)!\n", ip, synCount))
 			hasAlerts = true
 		}
@@ -620,7 +767,7 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 	if !hasAlerts {
 		sb.WriteString("      Nenhum tráfego suspeito evidente (baseado em anomalias de handshake) foi detectado.\n")
 	}
-	
+
 	sb.WriteString("=========================================================================\n\n")
 
 	reportContent := sb.String()
@@ -628,23 +775,36 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 	// 1. Imprime no console para o usuário ver
 	fmt.Print(reportContent)
 
-	// 2. Salva em um arquivo .txt
+	// 2. Salva o relatório geral em log_rede.txt
 	filename := "log_rede.txt"
 	err := os.WriteFile(filename, []byte(reportContent), 0644)
 	if err != nil {
-		fmt.Printf("  [-] Erro ao salvar o relatório no arquivo: %v\n", err)
+		fmt.Printf("  [-] Erro ao salvar o relatório geral no arquivo: %v\n", err)
 	} else {
-		fmt.Printf("  [+] Relatório salvo com sucesso no arquivo: %s\n", filename)
+		fmt.Printf("  [+] Relatório geral salvo com sucesso no arquivo: %s\n", filename)
+	}
+
+	// 3. Salva o relatório detalhado por IP e acessos em log_https.txt
+	httpsFilename := "log_https.txt"
+	errHTTPS := os.WriteFile(httpsFilename, []byte(httpsSB.String()), 0644)
+	if errHTTPS != nil {
+		fmt.Printf("  [-] Erro ao salvar o relatório de acessos no arquivo: %v\n", errHTTPS)
+	} else {
+		fmt.Printf("  [+] Relatório de acessos salvo com sucesso no arquivo: %s\n", httpsFilename)
 	}
 }
 
 // getInterfaceDetails busca o MAC e o CIDR baseados no IP descoberto
 func (s *SnifferService) getInterfaceDetails(targetIP string) (net.HardwareAddr, string) {
 	ifaces, err := net.Interfaces()
-	if err != nil { return nil, "" }
+	if err != nil {
+		return nil, ""
+	}
 	for _, iface := range ifaces {
 		addrs, err := iface.Addrs()
-		if err != nil { continue }
+		if err != nil {
+			continue
+		}
 		for _, addr := range addrs {
 			if ipnet, ok := addr.(*net.IPNet); ok {
 				if ipnet.IP.String() == targetIP {
@@ -670,7 +830,7 @@ func (s *SnifferService) ActiveARPSweep(deviceName string, srcMAC net.HardwareAd
 	}
 
 	ips := s.generateIPList(ipNet)
-	
+
 	for _, targetIP := range ips {
 		if targetIP.Equal(ip) || targetIP.Equal(s.broadcastIP(ipNet)) {
 			continue
@@ -706,7 +866,7 @@ func (s *SnifferService) sendARPRequest(handle *pcap.Handle, srcMAC net.Hardware
 		FixLengths:       true,
 		ComputeChecksums: true,
 	}
-	
+
 	if err := gopacket.SerializeLayers(buf, opts, &eth, &arp); err != nil {
 		return err
 	}
@@ -741,7 +901,7 @@ func (s *SnifferService) sendICMPEchoRequest(handle *pcap.Handle, srcMAC net.Har
 		FixLengths:       true,
 		ComputeChecksums: true,
 	}
-	
+
 	if err := gopacket.SerializeLayers(buf, opts, &eth, &ipv4, &icmp, gopacket.Payload([]byte("ajin_ping"))); err != nil {
 		return err
 	}
@@ -779,4 +939,117 @@ func (s *SnifferService) broadcastIP(n *net.IPNet) net.IP {
 		broadcast[i] = n.IP[i] | ^n.Mask[i]
 	}
 	return broadcast
+}
+
+// parseTLSSNI tenta extrair o SNI (Server Name Indication) de um Client Hello TLS
+func parseTLSSNI(data []byte) string {
+	if len(data) < 5 {
+		return ""
+	}
+	// TLS Record Header:
+	// Content Type: 0x16 (Handshake)
+	if data[0] != 0x16 {
+		return ""
+	}
+
+	// Handshake protocol header:
+	// Handshake Type: 1 byte (0x01 = Client Hello)
+	if len(data) < 6 {
+		return ""
+	}
+	if data[5] != 0x01 {
+		return ""
+	}
+
+	// Index começa em: 5 (início do handshake payload) + 4 (handshake header) = 9
+	idx := 9
+	if len(data) < idx+2 {
+		return ""
+	}
+	// Pula Version (2 bytes)
+	idx += 2
+
+	// Pula Random (32 bytes)
+	idx += 32
+
+	// Session ID (1 byte length prefix + session ID)
+	if len(data) < idx+1 {
+		return ""
+	}
+	sessionIDLen := int(data[idx])
+	idx += 1 + sessionIDLen
+
+	// Cipher Suites (2 bytes length prefix + cipher suites)
+	if len(data) < idx+2 {
+		return ""
+	}
+	cipherSuitesLen := int(data[idx])<<8 | int(data[idx+1])
+	idx += 2 + cipherSuitesLen
+
+	// Compression Methods (1 byte length prefix + compression methods)
+	if len(data) < idx+1 {
+		return ""
+	}
+	compressionMethodsLen := int(data[idx])
+	idx += 1 + compressionMethodsLen
+
+	// Extensions (2 bytes length prefix)
+	if len(data) < idx+2 {
+		return ""
+	}
+	extensionsLen := int(data[idx])<<8 | int(data[idx+1])
+	idx += 2
+
+	endExtensions := idx + extensionsLen
+	if len(data) < endExtensions {
+		endExtensions = len(data)
+	}
+
+	for idx+4 <= endExtensions {
+		extType := int(data[idx])<<8 | int(data[idx+1])
+		extLen := int(data[idx+2])<<8 | int(data[idx+3])
+		idx += 4
+		if idx+extLen > endExtensions {
+			break
+		}
+
+		if extType == 0x0000 { // Server Name Indication
+			// Estrutura SNI:
+			// 2 bytes list length
+			// 1 byte server name type (0 = hostname)
+			// 2 bytes server name length
+			// string do nome do servidor
+			sniIdx := idx
+			if sniIdx+5 <= idx+extLen {
+				sniIdx += 2 // pula list length
+				nameType := data[sniIdx]
+				nameLen := int(data[sniIdx+1])<<8 | int(data[sniIdx+2])
+				sniIdx += 3
+				if nameType == 0 && sniIdx+nameLen <= idx+extLen {
+					return string(data[sniIdx : sniIdx+nameLen])
+				}
+			}
+		}
+		idx += extLen
+	}
+
+	return ""
+}
+
+// parseHTTPHost tenta extrair o cabeçalho Host de uma requisição HTTP
+func parseHTTPHost(payload []byte) string {
+	s := string(payload)
+	if !strings.Contains(s, "HTTP/") {
+		return ""
+	}
+	lines := strings.Split(s, "\r\n")
+	for _, line := range lines {
+		if strings.HasPrefix(strings.ToLower(line), "host:") {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 {
+				return strings.TrimSpace(parts[1])
+			}
+		}
+	}
+	return ""
 }
