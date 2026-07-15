@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
@@ -65,6 +66,25 @@ var captivePortalDomains = map[string]string{
 	"nmcheck.gnome.org":                          "Linux (GNOME)",
 	"network-test.debian.org":                    "Linux (Debian)",
 	"detectportal.firefox.com":                   "Linux/Firefox",
+}
+
+const devicesFile = "known_devices.json"
+
+func loadKnownDevices() map[string]string {
+	data, err := os.ReadFile(devicesFile)
+	if err != nil {
+		return make(map[string]string)
+	}
+	var db map[string]string
+	if err := json.Unmarshal(data, &db); err != nil {
+		return make(map[string]string)
+	}
+	return db
+}
+
+func saveKnownDevices(db map[string]string) {
+	data, _ := json.MarshalIndent(db, "", "  ")
+	_ = os.WriteFile(devicesFile, data, 0644)
 }
 
 func NewSnifferLogs() *SnifferLogs {
@@ -373,6 +393,9 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 	// Seção de OS Fingerprinting (Técnicas 3 e 4 combinadas)
 	sb.WriteString("\n  [+] OS Fingerprinting (Identificação de Dispositivos Desconhecidos):\n")
 	
+	knownDevices := loadKnownDevices()
+	dbUpdated := false
+
 	// Coleta todos os IPs únicos que temos alguma informação de OS
 	allIPs := make(map[string]bool)
 	for ip := range logs.HostOSByDNS {
@@ -416,13 +439,37 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 				metodo = "TTL Fingerprint"
 			}
 
+			// Recupera o MAC
+			mac := logs.DiscoveredHosts[ip]
+
+			// Lógica de Persistência (Banco de Dados JSON)
+			if mac != "" {
+				if knownOS, exists := knownDevices[mac]; exists {
+					// Se já conhecíamos esse MAC, e a nova detecção é "Indeterminado" ou possivelmente falha (TTL baixo indicando Linux)
+					if veredito == "Indeterminado" || (metodo == "TTL Fingerprint" && strings.Contains(veredito, "Linux")) {
+						veredito = knownOS
+						metodo = "Persistência Local (BD)"
+					}
+				}
+
+				// Salva ou atualiza no BD se for um TTL confiável ou DNS
+				if !strings.Contains(metodo, "BD") && veredito != "Indeterminado" {
+					if metodo == "DNS Captive Portal" || (metodo == "TTL Fingerprint" && ttlVal > 30) {
+						if knownDevices[mac] != veredito {
+							knownDevices[mac] = veredito
+							dbUpdated = true
+						}
+					}
+				}
+			}
+
 			if veredito == "Indeterminado" {
 				continue
 			}
 
 			// Complementa com MAC se disponível
 			macStr := ""
-			if mac, exists := logs.DiscoveredHosts[ip]; exists && mac != "" {
+			if mac != "" {
 				vendor := manuf.Search(mac)
 				if vendor == "" {
 					vendor = "MAC Randomizado"
@@ -436,6 +483,10 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 			}
 
 			sb.WriteString(fmt.Sprintf("      - IP: %-15s | SO: %-30s | Método: %s%s%s\n", ip, veredito, metodo, ttlStr, macStr))
+		}
+
+		if dbUpdated {
+			saveKnownDevices(knownDevices)
 		}
 	} else {
 		sb.WriteString("      Nenhuma impressão digital de SO capturada nesta sessão.\n")
