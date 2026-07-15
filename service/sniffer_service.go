@@ -127,9 +127,15 @@ func (s *SnifferService) SniffNetwork(stopCh chan struct{}) {
 			// 2. Camada ARP (Excelente para Mapeamento Passivo de Rede e detectar Spoofing)
 			if arpLayer := packet.Layer(layers.LayerTypeARP); arpLayer != nil {
 				arp, _ := arpLayer.(*layers.ARP)
-				protocol = "ARP"
 				srcIP = net.IP(arp.SourceProtAddress).String()
 				dstIP = net.IP(arp.DstProtAddress).String()
+				
+				// Ignora tráfego do nosso próprio IP
+				if srcIP == deviceIP || dstIP == deviceIP {
+					continue
+				}
+
+				protocol = "ARP"
 				logs.DiscoveredHosts[srcIP] = srcMAC
 				extraInfo = "Protocolo de Resolução de Endereços (ARP)"
 			}
@@ -140,8 +146,8 @@ func (s *SnifferService) SniffNetwork(stopCh chan struct{}) {
 				dstIP = netLayer.NetworkFlow().Dst().String()
 				protocol = netLayer.LayerType().String()
 
-				// Filtro para ignorar IP ruidoso (Broadcast local)
-				if srcIP == "172.26.33.255" || dstIP == "172.26.33.255" {
+				// Filtro para ignorar IP ruidoso (Broadcast local) e a própria máquina
+				if srcIP == "172.26.33.255" || dstIP == "172.26.33.255" || srcIP == deviceIP || dstIP == deviceIP {
 					continue
 				}
 
