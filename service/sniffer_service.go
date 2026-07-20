@@ -1196,7 +1196,7 @@ func disableIPForwarding() {
 // ARPSpoofMitM executa o ataque de ARP Spoofing contra um alvo específico.
 // Isso força o tráfego do alvo a passar pela nossa máquina, permitindo
 // a captura de TTL, SNI, DNS e outros dados mesmo de máquinas em Modo Furtivo.
-func (s *SnifferService) ARPSpoofMitM(targetIP string, stopCh chan struct{}) {
+func (s *SnifferService) ARPSpoofMitM(targetIP, manualMAC string, stopCh chan struct{}) {
 	devices, err := pcap.FindAllDevs()
 	if err != nil {
 		log.Println("  [-] Erro ao buscar interfaces:", err)
@@ -1258,8 +1258,17 @@ func (s *SnifferService) ARPSpoofMitM(targetIP string, stopCh chan struct{}) {
 	fmt.Printf("      Gateway MAC: %s\n", gatewayMAC.String())
 
 	// Resolve o MAC do Alvo
-	fmt.Printf("  [*] Resolvendo MAC do Alvo (%s)...\n", targetIP)
-	targetMAC := s.resolveGatewayMAC(deviceName, myMAC, net.ParseIP(deviceIP), net.ParseIP(targetIP))
+	var targetMAC net.HardwareAddr
+	
+	if manualMAC != "" {
+		targetMAC, _ = net.ParseMAC(manualMAC)
+	}
+
+	if targetMAC == nil {
+		fmt.Printf("  [*] Resolvendo MAC do Alvo (%s)...\n", targetIP)
+		targetMAC = s.resolveGatewayMAC(deviceName, myMAC, net.ParseIP(deviceIP), net.ParseIP(targetIP))
+	}
+
 	if targetMAC == nil {
 		fmt.Printf("  [-] ARP Request falhou. Tentando buscar em dispositivos conhecidos...\n")
 		known := loadKnownDevices()
@@ -1276,7 +1285,12 @@ func (s *SnifferService) ARPSpoofMitM(targetIP string, stopCh chan struct{}) {
 	}
 	
 	if targetMAC == nil {
-		log.Println("  [-] Não foi possível resolver o MAC do Alvo. A máquina está offline ou isolada (AP Isolation)?")
+		fmt.Printf("\n  [!] Não foi possível descobrir o MAC de %s automaticamente.\n", targetIP)
+		fmt.Printf("  [!] Reinicie o MitM e forneça o MAC manualmente quando solicitado.\n")
+	}
+
+	if targetMAC == nil {
+		fmt.Println("  [-] Operação cancelada ou falha na resolução do MAC.")
 		return
 	}
 	fmt.Printf("      Alvo MAC:    %s\n", targetMAC.String())

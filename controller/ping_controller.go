@@ -233,11 +233,20 @@ func (c *PingController) runARPSpoof(scanner *bufio.Scanner) {
 		return
 	}
 
+	// Pergunta o MAC ANTES de lançar a goroutine para evitar conflito de stdin
+	fmt.Printf("\n  Digite o MAC do alvo (ex: 70:a8:d3:d1:51:91) ou ENTER para auto-resolver:\n")
+	fmt.Printf("  %s%smac > %s ", view.Bold, view.Red, view.Reset)
+
+	var manualMAC string
+	if scanner.Scan() {
+		manualMAC = strings.TrimSpace(scanner.Text())
+	}
+
 	sniffer := service.NewSnifferService()
 	stopCh := make(chan struct{})
 
 	// Roda o MitM em segundo plano
-	go sniffer.ARPSpoofMitM(targetIP, stopCh)
+	go sniffer.ARPSpoofMitM(targetIP, manualMAC, stopCh)
 
 	// Aguarda o usuário apertar Enter para encerrar
 	scanner.Scan()
