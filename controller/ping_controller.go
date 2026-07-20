@@ -141,9 +141,11 @@ func (c *PingController) runPortScanMenu(scanner *bufio.Scanner) {
   %s[ 2 ]%s Escanear portas locais (localhost)
   %s[ 3 ]%s Escanear dispositivos na rede WiFi
   %s[ 4 ]%s Modo Promíscuo (Escuta Passiva)
+  %s[ 5 ]%s ARP Spoof (Man-in-the-Middle)
   %s[ 0 ]%s Voltar
 `
 	fmt.Printf(submenu,
+		view.Yellow, view.Reset,
 		view.Yellow, view.Reset,
 		view.Yellow, view.Reset,
 		view.Yellow, view.Reset,
@@ -168,6 +170,8 @@ func (c *PingController) runPortScanMenu(scanner *bufio.Scanner) {
 		c.runNetworkScan(scanner)
 	case "4":
 		c.runPromiscuousMode(scanner)
+	case "5":
+		c.runARPSpoof(scanner)
 	default:
 		c.printer.PrintError("Opção inválida.")
 	}
@@ -198,6 +202,49 @@ func (c *PingController) runPromiscuousMode(scanner *bufio.Scanner) {
 	
 	// Aguarda um instante para o sniffer terminar de printar
 	time.Sleep(200 * time.Millisecond)
+}
+
+func (c *PingController) runARPSpoof(scanner *bufio.Scanner) {
+	fmt.Printf("\n  %s%s--- ARP Spoof (Man-in-the-Middle) ---%s\n", view.Bold, view.Red, view.Reset)
+	fmt.Printf("  %s[!] AVISO: Esta funcionalidade intercepta o tráfego de rede de um alvo.%s\n", view.Yellow, view.Reset)
+	fmt.Printf("  %s[!] Use APENAS em redes que você tem autorização para auditar.%s\n", view.Yellow, view.Reset)
+	fmt.Printf("  %s[!] Requer Npcap e privilégios de Administrador.%s\n", view.Yellow, view.Reset)
+	fmt.Printf("\n  Digite o IP do alvo (ex: 10.67.83.16) ou 'voltar':\n")
+	fmt.Printf("  %s%smitm > %s ", view.Bold, view.Red, view.Reset)
+
+	if !scanner.Scan() {
+		return
+	}
+	input := strings.TrimSpace(scanner.Text())
+	if input == "" || input == "voltar" {
+		return
+	}
+
+	targetIP := input
+
+	// Confirmação de segurança
+	fmt.Printf("\n  %s[!] Você tem certeza que deseja interceptar o tráfego de %s? (s/n):%s ", view.Red, targetIP, view.Reset)
+	if !scanner.Scan() {
+		return
+	}
+	confirm := strings.TrimSpace(strings.ToLower(scanner.Text()))
+	if confirm != "s" && confirm != "y" {
+		fmt.Printf("  Operação cancelada.\n")
+		return
+	}
+
+	sniffer := service.NewSnifferService()
+	stopCh := make(chan struct{})
+
+	// Roda o MitM em segundo plano
+	go sniffer.ARPSpoofMitM(targetIP, stopCh)
+
+	// Aguarda o usuário apertar Enter para encerrar
+	scanner.Scan()
+	close(stopCh)
+
+	// Aguarda a restauração da rede
+	time.Sleep(2 * time.Second)
 }
 
 func (c *PingController) runRemotePortScan(scanner *bufio.Scanner) {
