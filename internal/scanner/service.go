@@ -1,4 +1,4 @@
-package service
+package scanner
 
 import (
 	"encoding/base64"
@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gabrifranca/cli_ping/model"
+	"github.com/gabrifranca/cli_ping/internal/domain"
 )
 
 // CommonPorts lists the most common ports to scan during network discovery.
@@ -144,8 +144,8 @@ func (s *ExtraService) GetNetworkBase(ip string) string {
 }
 
 // 7. NetworkScan scans all 254 hosts in a /24 network checking common ports.
-func (s *ExtraService) NetworkScan(baseIP string, ports []int, onFound func(host model.NetworkHost)) []model.NetworkHost {
-	var results []model.NetworkHost
+func (s *ExtraService) NetworkScan(baseIP string, ports []int, onFound func(host domain.NetworkHost)) []domain.NetworkHost {
+	var results []domain.NetworkHost
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 30)
@@ -169,7 +169,7 @@ func (s *ExtraService) NetworkScan(baseIP string, ports []int, onFound func(host
 			}
 
 			if len(openPorts) > 0 {
-				host := model.NetworkHost{IP: ip, OpenPorts: openPorts}
+				host := domain.NetworkHost{IP: ip, OpenPorts: openPorts}
 				mu.Lock()
 				results = append(results, host)
 				mu.Unlock()
