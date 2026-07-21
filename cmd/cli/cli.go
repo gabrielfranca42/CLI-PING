@@ -300,8 +300,8 @@ func (c *CLI) runARPSpoof(scanner *bufio.Scanner) {
 	snifferSvc := sniffer.NewSnifferService()
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Flag compartilhada para pausar o MitM quando o BlackHole estiver ativo
-	var mitmPaused atomic.Bool
+	// Flag compartilhada para controlar exibição de logs em tempo real
+	var showLogs atomic.Bool
 
 	// Roda o MitM em segundo plano para cada alvo
 	for i, ip := range targetIPs {
@@ -309,7 +309,7 @@ func (c *CLI) runARPSpoof(scanner *bufio.Scanner) {
 		if i < len(manualMACs) {
 			mac = manualMACs[i]
 		}
-		go snifferSvc.ARPSpoofMitM(ctx, ip, mac, &mitmPaused)
+		go snifferSvc.ARPSpoofMitM(ctx, ip, mac, &showLogs)
 	}
 
 	// Aguarda um momento para o ARP Spoof se estabilizar
@@ -317,15 +317,16 @@ func (c *CLI) runARPSpoof(scanner *bufio.Scanner) {
 	time.Sleep(4 * time.Second)
 
 	// === SUBMENU DE MONITORAMENTO PÓS-ANEXO ===
-	c.runMonitorMenu(scanner, snifferSvc, targetIPs, ctx, cancel, &mitmPaused)
+	c.runMonitorMenu(scanner, snifferSvc, targetIPs, ctx, cancel, &showLogs)
 }
 
 // runMonitorMenu apresenta o submenu de monitoramento de rede após o IP ser anexado com sucesso.
 // Permite ao operador monitorar tráfego em tempo real, bloquear WiFi defensivamente e gerar logs.
-func (c *CLI) runMonitorMenu(scanner *bufio.Scanner, snifferSvc *sniffer.SnifferService, targetIPs []string, parentCtx context.Context, parentCancel context.CancelFunc, mitmPaused *atomic.Bool) {
+// O bloqueio usa Drop-Routing: o MitM continua atraindo pacotes, mas o Windows descarta tudo
+// porque o IP Forwarding está desativado.
+func (c *CLI) runMonitorMenu(scanner *bufio.Scanner, snifferSvc *sniffer.SnifferService, targetIPs []string, parentCtx context.Context, parentCancel context.CancelFunc, showLogs *atomic.Bool) {
 	// Estado de bloqueio local (para exibição no menu)
 	wifiBlocked := false
-	var blackholeCancel context.CancelFunc
 
 	for {
 		fmt.Printf("\n  %s%s══════════════════════════════════════════════════════════%s\n", view.Bold, view.Cyan, view.Reset)
@@ -333,15 +334,15 @@ func (c *CLI) runMonitorMenu(scanner *bufio.Scanner, snifferSvc *sniffer.Sniffer
 		fmt.Printf("  %s%s══════════════════════════════════════════════════════════%s\n", view.Bold, view.Cyan, view.Reset)
 		fmt.Printf("  %sIPs Anexados: %s%s\n", view.White, strings.Join(targetIPs, ", "), view.Reset)
 		if wifiBlocked {
-			fmt.Printf("  %s🛑 STATUS: BLOQUEIO TOTAL ATIVO (ARP Black Hole)%s\n", view.Red, view.Reset)
+			fmt.Printf("  %s🛑 STATUS: BLOQUEIO TOTAL ATIVO (Drop-Routing)%s\n", view.Red, view.Reset)
 		} else {
 			fmt.Printf("  %s✅ STATUS: MitM ativo — Alvo(s) com internet normal%s\n", view.Green, view.Reset)
 		}
 		fmt.Printf("  %s──────────────────────────────────────────────────────────%s\n", view.Cyan, view.Reset)
-		fmt.Printf("  %s[ 1 ]%s 📡 Monitorar Tráfego (Logs em tempo real + log_ip.txt)\n", view.Yellow, view.Reset)
-		fmt.Printf("  %s[ 2 ]%s 🛑 Negar WiFi (Bloqueio TOTAL — ARP Black Hole)\n", view.Yellow, view.Reset)
+		fmt.Printf("  %s[ 1 ]%s 📡 Monitorar Tráfego (Logs em tempo real)\n", view.Yellow, view.Reset)
+		fmt.Printf("  %s[ 2 ]%s 🛑 Negar WiFi (Bloqueio TOTAL — Drop-Routing)\n", view.Yellow, view.Reset)
 		fmt.Printf("  %s[ 3 ]%s ✅ Restaurar WiFi (Liberar acesso do alvo)\n", view.Yellow, view.Reset)
-		fmt.Printf("  %s[ 0 ]%s 🔙 Encerrar MitM e Restaurar Rede\n", view.Red, view.Reset)
+		fmt.Printf("  %s[ 0 ]%s 🔙 Encerrar MitM e Restaurar Rede (gera log_ip.txt)\n", view.Red, view.Reset)
 		fmt.Printf("  %s──────────────────────────────────────────────────────────%s\n", view.Cyan, view.Reset)
 		fmt.Printf("  %s%smonitor > %s ", view.Bold, view.Green, view.Reset)
 
@@ -352,67 +353,51 @@ func (c *CLI) runMonitorMenu(scanner *bufio.Scanner, snifferSvc *sniffer.Sniffer
 
 		switch input {
 		case "0", "voltar", "exit":
-			// Se estiver bloqueado, cancela o loop e restaura antes de sair
+			// Se estiver bloqueado, restaura IP Forwarding antes de sair
 			if wifiBlocked {
-				if blackholeCancel != nil {
-					blackholeCancel()
-					blackholeCancel = nil
-				}
 				fmt.Printf("\n  %s[*] Restaurando acesso WiFi dos alvos antes de encerrar...%s\n", view.Yellow, view.Reset)
-				snifferSvc.DeactivateBlackHole(targetIPs)
 				sniffer.EnableIPForwardingPublic()
 			}
-			// Encerra o MitM e restaura a rede
+			// Desliga os logs antes de encerrar
+			showLogs.Store(false)
+			// Encerra o MitM e restaura a rede (ARPSpoofMitM gera log_ip.txt ao encerrar)
 			fmt.Printf("\n  %s[*] Encerrando MitM e restaurando tabelas ARP...%s\n", view.Yellow, view.Reset)
 			parentCancel()
 			time.Sleep(3 * time.Second)
-			fmt.Printf("  %s[✓] Rede restaurada com sucesso.%s\n\n", view.Green, view.Reset)
+			fmt.Printf("  %s[✓] Rede restaurada com sucesso. Arquivo log_ip.txt gerado.%s\n\n", view.Green, view.Reset)
 			return
 
 		case "1":
-			c.runTrafficMonitor(scanner, snifferSvc, targetIPs[0])
+			c.runTrafficMonitor(scanner, showLogs, targetIPs[0])
 
 		case "2":
-			// Negar WiFi — Bloqueio TOTAL via ARP Black Hole
+			// Negar WiFi — Drop-Routing: desativa IP Forwarding enquanto MitM continua ativo
 			fmt.Printf("\n  %s[!] ATENÇÃO: Isso cortará TOTALMENTE o acesso à internet do(s) alvo(s).%s\n", view.Red, view.Reset)
-			fmt.Printf("  %s[!] Técnica: ARP Black Hole — O gateway apontará para um MAC inexistente.%s\n", view.Yellow, view.Reset)
+			fmt.Printf("  %s[!] Técnica: Drop-Routing — MitM redireciona, Windows descarta.%s\n", view.Yellow, view.Reset)
 			fmt.Printf("  %sDeseja prosseguir com o bloqueio total? (s/n):%s ", view.Bold, view.Reset)
 			if !scanner.Scan() {
 				continue
 			}
 			confirmBlock := strings.TrimSpace(strings.ToLower(scanner.Text()))
 			if confirmBlock == "s" || confirmBlock == "y" {
-				// Pausa o MitM para não conflitar com o BlackHole
-				mitmPaused.Store(true)
-				// Desabilita IP Forwarding como camada extra
 				sniffer.DisableIPForwardingPublic()
-				// Ativa o bloqueio via Black Hole com loop contínuo
-				bhCtx, bhCancel := context.WithCancel(context.Background())
-				blackholeCancel = bhCancel
-				snifferSvc.ActivateBlackHole(bhCtx, targetIPs)
 				wifiBlocked = true
 
 				fmt.Printf("\n  %s[🛑 BLOQUEIO TOTAL ATIVO]%s\n", view.Red, view.Reset)
-				fmt.Printf("  %s    → Técnica: ARP Black Hole (MAC de:ad:be:ef:00:01)%s\n", view.Yellow, view.Reset)
-				fmt.Printf("  %s    → O(s) alvo(s) não consegue(m) acessar NENHUM recurso de rede.%s\n", view.Yellow, view.Reset)
-				fmt.Printf("  %s    → Tráfego é descartado pelo switch — bloqueio 100%% efetivo.%s\n", view.Yellow, view.Reset)
+				fmt.Printf("  %s    → Técnica: Drop-Routing (IP Forwarding desativado)%s\n", view.Yellow, view.Reset)
+				fmt.Printf("  %s    → O MitM continua atraindo o tráfego do alvo.%s\n", view.Yellow, view.Reset)
+				fmt.Printf("  %s    → Windows recebe os pacotes e os descarta — bloqueio 100%% efetivo.%s\n", view.Yellow, view.Reset)
 				fmt.Printf("  %s    → Use a opção [3] para restaurar o acesso.%s\n\n", view.Cyan, view.Reset)
 			}
 
 		case "3":
-			// Restaurar WiFi — cancela loop contínuo e restaura ARPs
-			if blackholeCancel != nil {
-				blackholeCancel()
-				blackholeCancel = nil
-			}
-			snifferSvc.DeactivateBlackHole(targetIPs)
+			// Restaurar WiFi — reativa IP Forwarding
 			sniffer.EnableIPForwardingPublic()
-			// Retoma o MitM normal
-			mitmPaused.Store(false)
 			wifiBlocked = false
 
 			fmt.Printf("\n  %s[✓ RESTAURADO]%s WiFi dos alvos foi liberado.\n", view.Green, view.Reset)
-			fmt.Printf("  %s    → MitM ainda ativo — tráfego interceptado e encaminhado normalmente.%s\n", view.White, view.Reset)
+			fmt.Printf("  %s    → IP Forwarding reativado — tráfego encaminhado normalmente.%s\n", view.White, view.Reset)
+			fmt.Printf("  %s    → MitM ainda ativo — interceptação continua.%s\n", view.White, view.Reset)
 			fmt.Printf("  %s    → O(s) alvo(s) pode(m) acessar a internet normalmente.%s\n\n", view.White, view.Reset)
 
 		default:
@@ -421,63 +406,28 @@ func (c *CLI) runMonitorMenu(scanner *bufio.Scanner, snifferSvc *sniffer.Sniffer
 	}
 }
 
-// runTrafficMonitor inicia o monitoramento de tráfego em tempo real para um IP alvo.
-// O usuário pode navegar normalmente enquanto os logs são exibidos na tela.
-// Ao encerrar (ENTER), gera automaticamente o arquivo log_ip.txt.
-func (c *CLI) runTrafficMonitor(scanner *bufio.Scanner, snifferSvc *sniffer.SnifferService, targetIP string) {
+// runTrafficMonitor ativa a exibição de logs em tempo real do ARPSpoofMitM já em execução.
+// Não abre um novo pcap — apenas liga/desliga a flag showLogs da goroutine existente.
+// O log_ip.txt é gerado quando o MitM é encerrado (opção 0), não aqui.
+func (c *CLI) runTrafficMonitor(scanner *bufio.Scanner, showLogs *atomic.Bool, targetIP string) {
 	fmt.Printf("\n  %s%s══════════════════════════════════════════════════════════%s\n", view.Bold, view.Cyan, view.Reset)
 	fmt.Printf("  %s%s    📡 MONITORAMENTO EM TEMPO REAL — %s                   %s\n", view.Bold, view.Cyan, targetIP, view.Reset)
 	fmt.Printf("  %s%s══════════════════════════════════════════════════════════%s\n", view.Bold, view.Cyan, view.Reset)
-	fmt.Printf("  %s[*] Capturando todo o tráfego de %s em tempo real...%s\n", view.White, targetIP, view.Reset)
-	fmt.Printf("  %s[*] O alvo pode navegar normalmente. Logs aparecem abaixo.%s\n", view.White, view.Reset)
-	fmt.Printf("  %s[*] 🔍 = DNS | 🔒 = HTTPS | 🌐 = HTTP | 🚨 = Ameaça Detectada%s\n", view.Yellow, view.Reset)
-	fmt.Printf("  %s[!] Pressione ENTER para encerrar e gerar log_ip.txt%s\n\n", view.Yellow, view.Reset)
+	fmt.Printf("  %s[*] Exibindo tráfego interceptado de %s em tempo real...%s\n", view.White, targetIP, view.Reset)
+	fmt.Printf("  %s[*] 🔍 = DNS | 🔒 = HTTPS | 🌐 = HTTP%s\n", view.Yellow, view.Reset)
+	fmt.Printf("  %s[!] Pressione ENTER para parar a exibição e voltar ao menu.%s\n\n", view.Yellow, view.Reset)
 
-	monCtx, monCancel := context.WithCancel(context.Background())
-	blockCh := make(chan bool, 1)
-	alertCh := make(chan string, 100)
+	// Liga a exibição de logs em tempo real
+	showLogs.Store(true)
 
-	// Goroutine para processar alertas (exibição assíncrona)
-	go func() {
-		for {
-			select {
-			case <-monCtx.Done():
-				return
-			case alert := <-alertCh:
-				_ = alert // Alertas já são impressos no monitor.go
-			}
-		}
-	}()
-
-	// Inicia o monitoramento em background com captura de erro
-	errCh := make(chan error, 1)
-	go func() {
-		_, err := snifferSvc.MonitorTarget(monCtx, targetIP, "", nil, nil, nil, nil, blockCh, alertCh)
-		if err != nil {
-			errCh <- err
-		}
-	}()
-
-	// Verifica se houve erro imediato na inicialização (2s de margem)
-	select {
-	case err := <-errCh:
-		monCancel()
-		fmt.Printf("\n  %s[✗] Erro ao iniciar monitoramento: %v%s\n", view.Red, err, view.Reset)
-		fmt.Printf("  %s[!] Verifique se o Npcap está instalado e se está rodando como Administrador.%s\n", view.Yellow, view.Reset)
-		return
-	case <-time.After(2 * time.Second):
-		// Monitoramento iniciou com sucesso
-		fmt.Printf("  %s[✓] Monitoramento ativo. Pressione ENTER para encerrar.%s\n", view.Green, view.Reset)
-	}
-
-	// Aguarda ENTER para encerrar
+	// Aguarda ENTER para parar a exibição
 	scanner.Scan()
-	monCancel()
 
-	// Aguarda finalização e geração do log
-	time.Sleep(1 * time.Second)
+	// Desliga a exibição de logs (a captura continua em background)
+	showLogs.Store(false)
 
-	fmt.Printf("\n  %s[✓] Monitoramento encerrado. Arquivo log_ip.txt gerado.%s\n", view.Green, view.Reset)
+	fmt.Printf("\n  %s[✓] Exibição encerrada. A captura continua em background.%s\n", view.Green, view.Reset)
+	fmt.Printf("  %s[*] O log_ip.txt será gerado ao encerrar o MitM (opção 0).%s\n", view.White, view.Reset)
 }
 
 // runRemotePortScan pede um IP ao usuário e realiza um port scan básico contra um host remoto.
