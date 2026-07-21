@@ -90,6 +90,9 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 	for ip := range logs.HostAccesses {
 		allIPs[ip] = true
 	}
+	for ip := range logs.DiscoveredHosts {
+		allIPs[ip] = true
+	}
 
 	// Inicializa o StringBuilder para o log_https.txt
 	var httpsSB strings.Builder

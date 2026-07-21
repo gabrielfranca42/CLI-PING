@@ -193,8 +193,8 @@ func (s *SnifferService) SniffNetwork(ctx context.Context) error {
 				srcIP = net.IP(arp.SourceProtAddress).String()
 				dstIP = net.IP(arp.DstProtAddress).String()
 
-				// Ignora tráfego do nosso próprio IP
-				if srcIP == deviceIP || dstIP == deviceIP {
+				// Ignora tráfego originado pela nossa própria máquina
+				if srcIP == deviceIP {
 					continue
 				}
 

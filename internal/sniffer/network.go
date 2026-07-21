@@ -283,5 +283,17 @@ func disableIPForwarding() {
 	}
 }
 
+// EnableIPForwardingPublic é um wrapper público para ativar IP Forwarding externamente.
+// Usado pelo controlador CLI para restaurar o acesso à internet do alvo.
+func EnableIPForwardingPublic() error {
+	return enableIPForwarding()
+}
+
+// DisableIPForwardingPublic é um wrapper público para desativar IP Forwarding externamente.
+// Usado pelo controlador CLI para bloquear o acesso à internet do alvo (foco defensivo).
+func DisableIPForwardingPublic() {
+	disableIPForwarding()
+}
+
 // ARPSpoofMitM executa o ataque de ARP Spoofing contra um alvo especÃ­fico.
 // Isso forÃ§a o trÃ¡fego do alvo a passar pela nossa mÃ¡quina, permitindo
