@@ -319,14 +319,22 @@ func (c *CLI) runARPSpoof(scanner *bufio.Scanner) {
 // runMonitorMenu apresenta o submenu de monitoramento de rede após o IP ser anexado com sucesso.
 // Permite ao operador monitorar tráfego em tempo real, bloquear WiFi defensivamente e gerar logs.
 func (c *CLI) runMonitorMenu(scanner *bufio.Scanner, snifferSvc *sniffer.SnifferService, targetIPs []string, parentCtx context.Context, parentCancel context.CancelFunc) {
+	// Estado de bloqueio local (para exibição no menu)
+	wifiBlocked := false
+
 	for {
 		fmt.Printf("\n  %s%s══════════════════════════════════════════════════════════%s\n", view.Bold, view.Cyan, view.Reset)
 		fmt.Printf("  %s%s       MONITORAMENTO DE REDE — PAINEL DEFENSIVO         %s\n", view.Bold, view.Cyan, view.Reset)
 		fmt.Printf("  %s%s══════════════════════════════════════════════════════════%s\n", view.Bold, view.Cyan, view.Reset)
 		fmt.Printf("  %sIPs Anexados: %s%s\n", view.White, strings.Join(targetIPs, ", "), view.Reset)
+		if wifiBlocked {
+			fmt.Printf("  %s🛑 STATUS: BLOQUEIO TOTAL ATIVO (ARP Black Hole)%s\n", view.Red, view.Reset)
+		} else {
+			fmt.Printf("  %s✅ STATUS: MitM ativo — Alvo(s) com internet normal%s\n", view.Green, view.Reset)
+		}
 		fmt.Printf("  %s──────────────────────────────────────────────────────────%s\n", view.Cyan, view.Reset)
 		fmt.Printf("  %s[ 1 ]%s 📡 Monitorar Tráfego (Logs em tempo real + log_ip.txt)\n", view.Yellow, view.Reset)
-		fmt.Printf("  %s[ 2 ]%s 🛑 Negar WiFi (Bloquear acesso à internet do alvo)\n", view.Yellow, view.Reset)
+		fmt.Printf("  %s[ 2 ]%s 🛑 Negar WiFi (Bloqueio TOTAL — ARP Black Hole)\n", view.Yellow, view.Reset)
 		fmt.Printf("  %s[ 3 ]%s ✅ Restaurar WiFi (Liberar acesso do alvo)\n", view.Yellow, view.Reset)
 		fmt.Printf("  %s[ 0 ]%s 🔙 Encerrar MitM e Restaurar Rede\n", view.Red, view.Reset)
 		fmt.Printf("  %s──────────────────────────────────────────────────────────%s\n", view.Cyan, view.Reset)
@@ -339,6 +347,11 @@ func (c *CLI) runMonitorMenu(scanner *bufio.Scanner, snifferSvc *sniffer.Sniffer
 
 		switch input {
 		case "0", "voltar", "exit":
+			// Se estiver bloqueado, restaura antes de sair
+			if wifiBlocked {
+				fmt.Printf("\n  %s[*] Restaurando acesso WiFi dos alvos antes de encerrar...%s\n", view.Yellow, view.Reset)
+				sniffer.EnableIPForwardingPublic()
+			}
 			// Encerra o MitM e restaura a rede
 			fmt.Printf("\n  %s[*] Encerrando MitM e restaurando tabelas ARP...%s\n", view.Yellow, view.Reset)
 			parentCancel()
@@ -350,25 +363,36 @@ func (c *CLI) runMonitorMenu(scanner *bufio.Scanner, snifferSvc *sniffer.Sniffer
 			c.runTrafficMonitor(scanner, snifferSvc, targetIPs[0])
 
 		case "2":
-			// Negar WiFi — bloqueia o IP Forwarding para que o tráfego não seja reencaminhado
-			fmt.Printf("\n  %s[!] ATENÇÃO: Isso cortará o acesso à internet do(s) alvo(s).%s\n", view.Red, view.Reset)
-			fmt.Printf("  %sDeseja prosseguir com o bloqueio? (s/n):%s ", view.Bold, view.Reset)
+			// Negar WiFi — Bloqueio TOTAL via ARP Black Hole
+			fmt.Printf("\n  %s[!] ATENÇÃO: Isso cortará TOTALMENTE o acesso à internet do(s) alvo(s).%s\n", view.Red, view.Reset)
+			fmt.Printf("  %s[!] Técnica: ARP Black Hole — O gateway apontará para um MAC inexistente.%s\n", view.Yellow, view.Reset)
+			fmt.Printf("  %sDeseja prosseguir com o bloqueio total? (s/n):%s ", view.Bold, view.Reset)
 			if !scanner.Scan() {
 				continue
 			}
 			confirmBlock := strings.TrimSpace(strings.ToLower(scanner.Text()))
 			if confirmBlock == "s" || confirmBlock == "y" {
+				// Desabilita IP Forwarding como camada extra
 				sniffer.DisableIPForwardingPublic()
-				fmt.Printf("\n  %s[🛑 BLOQUEIO ATIVO]%s IP Forwarding DESATIVADO.\n", view.Red, view.Reset)
-				fmt.Printf("  %s    → O(s) alvo(s) não consegue(m) mais acessar a internet.%s\n", view.Yellow, view.Reset)
-				fmt.Printf("  %s    → Tráfego está sendo interceptado, mas NÃO encaminhado.%s\n", view.Yellow, view.Reset)
+				// Ativa o bloqueio via Black Hole para cada alvo
+				snifferSvc.ActivateBlackHole(targetIPs)
+				wifiBlocked = true
+
+				fmt.Printf("\n  %s[🛑 BLOQUEIO TOTAL ATIVO]%s\n", view.Red, view.Reset)
+				fmt.Printf("  %s    → Técnica: ARP Black Hole (MAC de:ad:be:ef:00:01)%s\n", view.Yellow, view.Reset)
+				fmt.Printf("  %s    → O(s) alvo(s) não consegue(m) acessar NENHUM recurso de rede.%s\n", view.Yellow, view.Reset)
+				fmt.Printf("  %s    → Tráfego é descartado pelo switch — bloqueio 100%% efetivo.%s\n", view.Yellow, view.Reset)
 				fmt.Printf("  %s    → Use a opção [3] para restaurar o acesso.%s\n\n", view.Cyan, view.Reset)
 			}
 
 		case "3":
-			// Restaurar WiFi — reativa IP Forwarding
+			// Restaurar WiFi — desativa Black Hole e reativa MitM normal
+			snifferSvc.DeactivateBlackHole(targetIPs)
 			sniffer.EnableIPForwardingPublic()
-			fmt.Printf("\n  %s[✓ RESTAURADO]%s IP Forwarding REATIVADO.\n", view.Green, view.Reset)
+			wifiBlocked = false
+
+			fmt.Printf("\n  %s[✓ RESTAURADO]%s WiFi dos alvos foi liberado.\n", view.Green, view.Reset)
+			fmt.Printf("  %s    → MitM ainda ativo — tráfego interceptado e encaminhado normalmente.%s\n", view.White, view.Reset)
 			fmt.Printf("  %s    → O(s) alvo(s) pode(m) acessar a internet normalmente.%s\n\n", view.White, view.Reset)
 
 		default:

