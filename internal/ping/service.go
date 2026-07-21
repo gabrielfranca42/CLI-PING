@@ -1,4 +1,4 @@
-package service
+package ping
 
 import (
 	"crypto/tls"
@@ -8,13 +8,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gabrifranca/cli_ping/model"
+	"github.com/gabrifranca/cli_ping/internal/domain"
 )
 
 // PingService handles the business logic for pinging endpoints.
 type PingService struct{}
 
-// NewPingService creates a new PingService instance.
+// NewPingService é o construtor da camada de serviço de Ping.
+// Retorna uma nova instância do serviço pronta para uso. instance.
 func NewPingService() *PingService {
 	return &PingService{}
 }
@@ -29,10 +30,10 @@ func (s *PingService) normalizeURL(rawURL string) string {
 }
 
 // Ping sends an HTTP request to the given URL and returns the result.
-func (s *PingService) Ping(rawURL string, opts model.PingOptions) model.PingResult {
+func (s *PingService) Ping(rawURL string, opts domain.PingOptions) domain.PingResult {
 	url := s.normalizeURL(rawURL)
 
-	result := model.PingResult{
+	result := domain.PingResult{
 		URL:       url,
 		Timestamp: time.Now(),
 	}
@@ -86,8 +87,8 @@ func (s *PingService) Ping(rawURL string, opts model.PingOptions) model.PingResu
 }
 
 // PingMultiple pings a list of URLs and returns all results.
-func (s *PingService) PingMultiple(urls []string, opts model.PingOptions) []model.PingResult {
-	results := make([]model.PingResult, 0, len(urls))
+func (s *PingService) PingMultiple(urls []string, opts domain.PingOptions) []domain.PingResult {
+	results := make([]domain.PingResult, 0, len(urls))
 	for _, url := range urls {
 		results = append(results, s.Ping(url, opts))
 	}
@@ -95,8 +96,8 @@ func (s *PingService) PingMultiple(urls []string, opts model.PingOptions) []mode
 }
 
 // PingRepeat pings a URL multiple times with a delay interval.
-func (s *PingService) PingRepeat(rawURL string, opts model.PingOptions) []model.PingResult {
-	results := make([]model.PingResult, 0, opts.Count)
+func (s *PingService) PingRepeat(rawURL string, opts domain.PingOptions) []domain.PingResult {
+	results := make([]domain.PingResult, 0, opts.Count)
 	for i := 0; i < opts.Count; i++ {
 		results = append(results, s.Ping(rawURL, opts))
 		if i < opts.Count-1 {
@@ -107,9 +108,9 @@ func (s *PingService) PingRepeat(rawURL string, opts model.PingOptions) []model.
 }
 
 // CheckTLS performs a TLS handshake and returns certificate info.
-func (s *PingService) CheckTLS(rawURL string, timeout time.Duration) model.PingResult {
+func (s *PingService) CheckTLS(rawURL string, timeout time.Duration) domain.PingResult {
 	url := s.normalizeURL(rawURL)
-	result := model.PingResult{
+	result := domain.PingResult{
 		URL:       url,
 		Timestamp: time.Now(),
 	}
