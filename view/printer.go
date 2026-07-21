@@ -6,10 +6,10 @@ import (
 	"os"
 	"text/tabwriter"
 
-	"github.com/gabrifranca/cli_ping/model"
+	"github.com/gabrifranca/cli_ping/internal/domain"
 )
 
-// Colors ANSI
+// Cores ANSI
 const (
 	Reset   = "\033[0m"
 	Red     = "\033[31m"
@@ -23,15 +23,15 @@ const (
 	Dim     = "\033[2m"
 )
 
-// Printer handles all output formatting for the CLI.
+// Printer lida com toda a formatação de saída para a CLI.
 type Printer struct{}
 
-// NewPrinter creates a new Printer instance.
+// NewPrinter cria uma nova instância de Printer.
 func NewPrinter() *Printer {
 	return &Printer{}
 }
 
-// PrintBanner displays the CLI banner.
+// PrintBanner exibe o banner da CLI.
 func (p *Printer) PrintBanner() {
 	banner := `
        █████╗      ██╗██╗███╗   ██╗
@@ -44,8 +44,8 @@ func (p *Printer) PrintBanner() {
 	fmt.Printf("  %s%sService Health Checker v1.0%s\n\n", Dim, White, Reset)
 }
 
-// PrintResult displays a single ping result with colors.
-func (p *Printer) PrintResult(result model.PingResult) {
+// PrintResult exibe um único resultado de ping com cores.
+func (p *Printer) PrintResult(result domain.PingResult) {
 	statusColor := p.getStatusColor(result.Status)
 
 	fmt.Printf("  %s┌─────────────────────────────────────────────────┐%s\n", Dim, Reset)
@@ -56,17 +56,17 @@ func (p *Printer) PrintResult(result model.PingResult) {
 	fmt.Printf("  %s│%s  Status:      %s%-35s%s%s│%s\n",
 		Dim, Reset, statusColor, result.Status, Reset, Dim, Reset)
 
-	// Status Code
+	// Código de Status
 	if result.StatusCode > 0 {
 		fmt.Printf("  %s│%s  HTTP Code:   %-35d%s│%s\n",
 			Dim, Reset, result.StatusCode, Dim, Reset)
 	}
 
-	// Latency
+	// Latência
 	fmt.Printf("  %s│%s  Latency:     %-35s%s│%s\n",
 		Dim, Reset, result.Latency.Round(1_000_000).String(), Dim, Reset)
 
-	// Alive
+	// Ativo
 	aliveStr := fmt.Sprintf("%s✗ Offline%s", Red, Reset)
 	if result.Alive {
 		aliveStr = fmt.Sprintf("%s✓ Online%s", Green, Reset)
@@ -74,7 +74,7 @@ func (p *Printer) PrintResult(result model.PingResult) {
 	fmt.Printf("  %s│%s  Alive:       %-44s%s│%s\n",
 		Dim, Reset, aliveStr, Dim, Reset)
 
-	// TLS Info
+	// Informações TLS
 	if !result.TLSExpiry.IsZero() {
 		tlsStr := fmt.Sprintf("%s✓ Valid (expires %s)%s", Green, result.TLSExpiry.Format("2006-01-02"), Reset)
 		if !result.TLSValid {
@@ -84,24 +84,24 @@ func (p *Printer) PrintResult(result model.PingResult) {
 			Dim, Reset, tlsStr, Dim, Reset)
 	}
 
-	// Error
+	// Erro
 	if result.Error != "" {
 		fmt.Printf("  %s│%s  Error:       %s%-35s%s%s│%s\n",
 			Dim, Reset, Red, truncate(result.Error, 35), Reset, Dim, Reset)
 	}
 
-	// Timestamp
+	// Data e Hora
 	fmt.Printf("  %s│%s  Checked at:  %-35s%s│%s\n",
 		Dim, Reset, result.Timestamp.Format("15:04:05 02/01/2006"), Dim, Reset)
 
 	fmt.Printf("  %s└─────────────────────────────────────────────────┘%s\n\n", Dim, Reset)
 }
 
-// PrintResultsTable displays multiple results in a compact table format.
-func (p *Printer) PrintResultsTable(results []model.PingResult) {
+// PrintResultsTable exibe múltiplos resultados em um formato de tabela compacta.
+func (p *Printer) PrintResultsTable(results []domain.PingResult) {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 
-	// Header
+	// Cabeçalho
 	fmt.Fprintf(w, "  %s%sURL\tSTATUS\tCODE\tLATENCY\tALIVE%s\n", Bold, White, Reset)
 	fmt.Fprintf(w, "  %s───\t──────\t────\t───────\t─────%s\n", Dim, Reset)
 
@@ -128,15 +128,15 @@ func (p *Printer) PrintResultsTable(results []model.PingResult) {
 	fmt.Println()
 }
 
-// PrintJSON outputs results in JSON format.
-func (p *Printer) PrintJSON(results []model.PingResult) error {
+// PrintJSON exibe os resultados em formato JSON.
+func (p *Printer) PrintJSON(results []domain.PingResult) error {
 	encoder := json.NewEncoder(os.Stdout)
 	encoder.SetIndent("", "  ")
 	return encoder.Encode(results)
 }
 
-// PrintRepeatSummary displays a summary after repeated pings.
-func (p *Printer) PrintRepeatSummary(results []model.PingResult) {
+// PrintRepeatSummary exibe um resumo após pings repetidos.
+func (p *Printer) PrintRepeatSummary(results []domain.PingResult) {
 	if len(results) == 0 {
 		return
 	}
@@ -172,17 +172,17 @@ func (p *Printer) PrintRepeatSummary(results []model.PingResult) {
 	fmt.Printf("  %s%s──────────────────────────────────────────────────%s\n\n", Bold, Cyan, Reset)
 }
 
-// PrintError displays an error message.
+// PrintError exibe uma mensagem de erro.
 func (p *Printer) PrintError(msg string) {
 	fmt.Printf("  %s✗ Error: %s%s\n", Red, msg, Reset)
 }
 
-// PrintInfo displays an informational message.
+// PrintInfo exibe uma mensagem informativa.
 func (p *Printer) PrintInfo(msg string) {
 	fmt.Printf("  %sℹ %s%s\n", Cyan, msg, Reset)
 }
 
-// getStatusColor returns the ANSI color for a given status.
+// getStatusColor retorna a cor ANSI para um determinado status.
 func (p *Printer) getStatusColor(status string) string {
 	switch status {
 	case "UP":
@@ -202,7 +202,7 @@ func (p *Printer) getStatusColor(status string) string {
 	}
 }
 
-// truncate shortens a string to the given max length.
+// truncate encurta uma string para o tamanho máximo fornecido.
 func truncate(s string, max int) string {
 	if len(s) <= max {
 		return s
