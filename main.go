@@ -1,8 +1,8 @@
 package main
 
-import "github.com/gabrifranca/cli_ping/controller"
+import "github.com/gabrifranca/cli_ping/cmd/cli"
 
 func main() {
-	ctrl := controller.NewPingController()
-	ctrl.ParseAndRun()
+	app := cli.NewCLI()
+	app.ParseAndRun()
 }

@@ -1,35 +1,41 @@
-package controller
+package cli
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 
-	"github.com/gabrifranca/cli_ping/model"
-	"github.com/gabrifranca/cli_ping/service"
+	"github.com/gabrifranca/cli_ping/internal/domain"
+	"github.com/gabrifranca/cli_ping/internal/ping"
+	scannerPkg "github.com/gabrifranca/cli_ping/internal/scanner"
+	"github.com/gabrifranca/cli_ping/internal/sniffer"
 	"github.com/gabrifranca/cli_ping/view"
 )
 
-// PingController orchestrates the ping operations between service and view.
-type PingController struct {
-	service      *service.PingService
-	extraService *service.ExtraService
+// CLI é o controlador principal do sistema (Controller).
+// Ele orquestra as dependências de negócio (Pinger, Scanner) e a visualização (Printer).
+type CLI struct {
+	service      domain.Pinger
+	extraService domain.Scanner
 	printer      *view.Printer
 }
 
-// NewPingController creates a new PingController instance.
-func NewPingController() *PingController {
-	return &PingController{
-		service:      service.NewPingService(),
-		extraService: service.NewExtraService(),
+// NewCLI é o construtor responsável pela injeção de dependências.
+// Ele conecta o CLI com as implementações concretas dos serviços de rede.
+func NewCLI() *CLI {
+	return &CLI{
+		service:      ping.NewPingService(),
+		extraService: scannerPkg.NewExtraService(),
 		printer:      view.NewPrinter(),
 	}
 }
 
-// RunInteractive starts the interactive REPL mode.
-func (c *PingController) RunInteractive() {
+// RunInteractive inicia o modo de menu interativo (REPL).
+// Mantém o usuário em um loop contínuo escolhendo opções até que ele decida sair (opção 10 ou 'exit').
+func (c *CLI) RunInteractive() {
 	c.printer.PrintBanner()
 	scanner := bufio.NewScanner(os.Stdin)
 
@@ -69,8 +75,8 @@ func (c *PingController) RunInteractive() {
 	}
 }
 
-// printMainMenu shows the available commands in interactive mode.
-func (c *PingController) printMainMenu() {
+// printMainMenu imprime as opções disponíveis na tela inicial do Ajin.
+func (c *CLI) printMainMenu() {
 	menu := `  %s%sMENU PRINCIPAL:%s
   ──────────────────────────────────────────────────
   %s[ 1 ]%s Ping / Verificação de TLS
@@ -92,7 +98,8 @@ func (c *PingController) printMainMenu() {
 	)
 }
 
-func (c *PingController) runPingMenu(scanner *bufio.Scanner) {
+// runPingMenu controla o submenu responsável por Testes de Conectividade (Ping e TLS).
+func (c *CLI) runPingMenu(scanner *bufio.Scanner) {
 	fmt.Printf("\n  %s%s--- Ping / TLS Check ---%s\n", view.Bold, view.Cyan, view.Reset)
 	fmt.Printf("  Digite a URL ou o comando (ex: ping google.com, check google.com) ou 'voltar':\n")
 	fmt.Printf("  %s%sping >%s ", view.Bold, view.Green, view.Reset)
@@ -123,19 +130,20 @@ func (c *PingController) runPingMenu(scanner *bufio.Scanner) {
 			c.printer.PrintError("informe uma URL. Ex: check google.com")
 			return
 		}
-		opts := model.DefaultPingOptions()
+		opts := domain.DefaultPingOptions()
 		result := c.service.CheckTLS(tokens[1], opts.Timeout)
 		c.printer.PrintResult(result)
 
 	default:
 		// Treat as a URL directly
-		opts := model.DefaultPingOptions()
+		opts := domain.DefaultPingOptions()
 		result := c.service.Ping(input, opts)
 		c.printer.PrintResult(result)
 	}
 }
 
-func (c *PingController) runPortScanMenu(scanner *bufio.Scanner) {
+// runPortScanMenu controla o submenu responsável por Análises de Portas TCP e Varreduras de Rede.
+func (c *CLI) runPortScanMenu(scanner *bufio.Scanner) {
 	fmt.Printf("\n  %s%s--- Port Scanner ---%s\n", view.Bold, view.Cyan, view.Reset)
 	submenu := `  %s[ 1 ]%s Escanear porta em host remoto
   %s[ 2 ]%s Escanear portas locais (localhost)
@@ -177,7 +185,8 @@ func (c *PingController) runPortScanMenu(scanner *bufio.Scanner) {
 	}
 }
 
-func (c *PingController) runPromiscuousMode(scanner *bufio.Scanner) {
+// runPromiscuousMode ativa o Sniffer de Rede em Modo Promíscuo para captura e análise passiva de tráfego.
+func (c *CLI) runPromiscuousMode(scanner *bufio.Scanner) {
 	fmt.Printf("\n  %s[!] AVISO:%s O Modo Promíscuo requer driver Npcap e privilégios de Administrador.\n", view.Yellow, view.Reset)
 	fmt.Printf("  %sDeseja iniciar a escuta passiva? (s/n):%s ", view.Bold, view.Reset)
 
@@ -190,21 +199,22 @@ func (c *PingController) runPromiscuousMode(scanner *bufio.Scanner) {
 		return
 	}
 
-	sniffer := service.NewSnifferService()
-	stopCh := make(chan struct{})
+	snifferSvc := sniffer.NewSnifferService()
+	ctx, cancel := context.WithCancel(context.Background())
 
 	// Roda o sniffer em segundo plano
-	go sniffer.SniffNetwork(stopCh)
+	go snifferSvc.SniffNetwork(ctx)
 
 	// Aguarda o usuário apertar Enter para cancelar
 	scanner.Scan()
-	close(stopCh)
+	cancel()
 	
 	// Aguarda um instante para o sniffer terminar de printar
 	time.Sleep(200 * time.Millisecond)
 }
 
-func (c *PingController) runARPSpoof(scanner *bufio.Scanner) {
+// runARPSpoof inicia a funcionalidade de Man-in-the-Middle, injetando pacotes ARP na rede local.
+func (c *CLI) runARPSpoof(scanner *bufio.Scanner) {
 	fmt.Printf("\n  %s%s--- ARP Spoof (Man-in-the-Middle) ---%s\n", view.Bold, view.Red, view.Reset)
 	fmt.Printf("  %s[!] AVISO: Esta funcionalidade intercepta o tráfego de rede de um alvo.%s\n", view.Yellow, view.Reset)
 	fmt.Printf("  %s[!] Use APENAS em redes que você tem autorização para auditar.%s\n", view.Yellow, view.Reset)
@@ -242,21 +252,22 @@ func (c *PingController) runARPSpoof(scanner *bufio.Scanner) {
 		manualMAC = strings.TrimSpace(scanner.Text())
 	}
 
-	sniffer := service.NewSnifferService()
-	stopCh := make(chan struct{})
+	snifferSvc := sniffer.NewSnifferService()
+	ctx, cancel := context.WithCancel(context.Background())
 
 	// Roda o MitM em segundo plano
-	go sniffer.ARPSpoofMitM(targetIP, manualMAC, stopCh)
+	go snifferSvc.ARPSpoofMitM(ctx, targetIP, manualMAC)
 
 	// Aguarda o usuário apertar Enter para encerrar
 	scanner.Scan()
-	close(stopCh)
+	cancel()
 
 	// Aguarda a restauração da rede
 	time.Sleep(2 * time.Second)
 }
 
-func (c *PingController) runRemotePortScan(scanner *bufio.Scanner) {
+// runRemotePortScan pede um IP ao usuário e realiza um port scan básico contra um host remoto.
+func (c *CLI) runRemotePortScan(scanner *bufio.Scanner) {
 	fmt.Printf("\n  Digite o host e a porta (ex: google.com 443) ou 'voltar':\n")
 	fmt.Printf("  %s%sscan >%s ", view.Bold, view.Green, view.Reset)
 
@@ -285,7 +296,8 @@ func (c *PingController) runRemotePortScan(scanner *bufio.Scanner) {
 	}
 }
 
-func (c *PingController) runLocalPortScan(scanner *bufio.Scanner) {
+// runLocalPortScan analisa a própria máquina (localhost) em busca de portas TCP abertas num intervalo definido.
+func (c *CLI) runLocalPortScan(scanner *bufio.Scanner) {
 	fmt.Printf("\n  Range de portas (ex: 1 1024) ou 'all' para 1-65535:\n")
 	fmt.Printf("  %s%srange >%s ", view.Bold, view.Green, view.Reset)
 
@@ -322,7 +334,7 @@ func (c *PingController) runLocalPortScan(scanner *bufio.Scanner) {
 	}
 
 	for _, port := range openPorts {
-		name := service.PortNames[port]
+		name := scannerPkg.PortNames[port]
 		if name != "" {
 			fmt.Printf("  %s✓ Porta %-5d (%s)%s\n", view.Green, port, name, view.Reset)
 		} else {
@@ -334,7 +346,9 @@ func (c *PingController) runLocalPortScan(scanner *bufio.Scanner) {
 		view.White, len(openPorts), elapsed.Round(time.Millisecond), view.Reset)
 }
 
-func (c *PingController) runNetworkScan(scanner *bufio.Scanner) {
+// runNetworkScan varre ativamente toda a sub-rede enviando requisições (Ping Sweep e Port Scan)
+// para montar um mapa dos dispositivos conectados atualmente.
+func (c *CLI) runNetworkScan(scanner *bufio.Scanner) {
 	localIP, err := c.extraService.GetLocalIP()
 	if err != nil {
 		c.printer.PrintError(fmt.Sprintf("Erro ao detectar IP local: %v", err))
@@ -349,14 +363,14 @@ func (c *PingController) runNetworkScan(scanner *bufio.Scanner) {
 
 	fmt.Printf("\n  %sSeu IP: %s%s\n", view.White, localIP, view.Reset)
 	fmt.Printf("  %sRede detectada: %s.0/24%s\n", view.White, base, view.Reset)
-	c.printer.PrintInfo(fmt.Sprintf("Escaneando 254 hosts com %d portas comuns ...\n", len(service.CommonPorts)))
+	c.printer.PrintInfo(fmt.Sprintf("Escaneando 254 hosts com %d portas comuns ...\n", len(scannerPkg.CommonPorts)))
 
 	startTime := time.Now()
 
-	onFound := func(host model.NetworkHost) {
+	onFound := func(host domain.NetworkHost) {
 		portStrs := []string{}
 		for _, p := range host.OpenPorts {
-			name := service.PortNames[p]
+			name := scannerPkg.PortNames[p]
 			if name != "" {
 				portStrs = append(portStrs, fmt.Sprintf("%d (%s)", p, name))
 			} else {
@@ -376,7 +390,7 @@ func (c *PingController) runNetworkScan(scanner *bufio.Scanner) {
 			strings.Join(portStrs, ", "), label)
 	}
 
-	results := c.extraService.NetworkScan(base, service.CommonPorts, onFound)
+	results := c.extraService.NetworkScan(base, scannerPkg.CommonPorts, onFound)
 	elapsed := time.Since(startTime)
 
 	if len(results) == 0 {
@@ -388,7 +402,8 @@ func (c *PingController) runNetworkScan(scanner *bufio.Scanner) {
 		view.White, len(results), elapsed.Round(time.Millisecond), view.Reset)
 }
 
-func (c *PingController) runDNSMenu(scanner *bufio.Scanner) {
+// runDNSMenu resolve nomes de domínio para descobrir quais IPs estão associados a uma URL.
+func (c *CLI) runDNSMenu(scanner *bufio.Scanner) {
 	fmt.Printf("\n  %s%s--- Consulta DNS ---%s\n", view.Bold, view.Cyan, view.Reset)
 	fmt.Printf("  Digite o host (ex: google.com) ou 'voltar':\n")
 	fmt.Printf("  %s%sdns >%s ", view.Bold, view.Green, view.Reset)
@@ -413,7 +428,8 @@ func (c *PingController) runDNSMenu(scanner *bufio.Scanner) {
 	fmt.Println()
 }
 
-func (c *PingController) runLoadTestMenu(scanner *bufio.Scanner) {
+// runLoadTestMenu cria dezenas de conexões concorrentes para testar a resiliência de um servidor HTTP.
+func (c *CLI) runLoadTestMenu(scanner *bufio.Scanner) {
 	fmt.Printf("\n  %s%s--- Load Testing ---%s\n", view.Bold, view.Cyan, view.Reset)
 	fmt.Printf("  Digite a URL, quantidade de requisições e concorrência (ex: http://google.com 100 10) ou 'voltar':\n")
 	fmt.Printf("  %s%sload >%s ", view.Bold, view.Green, view.Reset)
@@ -446,7 +462,8 @@ func (c *PingController) runLoadTestMenu(scanner *bufio.Scanner) {
 	fmt.Printf("  %sFalha:   %d%s\n\n", view.Red, failed, view.Reset)
 }
 
-func (c *PingController) runJWTMenu(scanner *bufio.Scanner) {
+// runJWTMenu decodifica a base64 de um token JWT para facilitar a leitura de suas Claims (cabeçalho e payload).
+func (c *CLI) runJWTMenu(scanner *bufio.Scanner) {
 	fmt.Printf("\n  %s%s--- Decodificador JWT ---%s\n", view.Bold, view.Cyan, view.Reset)
 	fmt.Printf("  Cole o seu token JWT ou digite 'voltar':\n")
 	fmt.Printf("  %s%sjwt >%s ", view.Bold, view.Green, view.Reset)
@@ -470,7 +487,7 @@ func (c *PingController) runJWTMenu(scanner *bufio.Scanner) {
 }
 
 // executePing runs the ping logic for interactive mode.
-func (c *PingController) executePing(args []string, opts model.PingOptions, jsonOutput bool) {
+func (c *CLI) executePing(args []string, opts domain.PingOptions, jsonOutput bool) {
 	if len(args) == 0 {
 		c.printer.PrintError("nenhuma URL fornecida.")
 		return
@@ -512,7 +529,7 @@ func (c *PingController) executePing(args []string, opts model.PingOptions, json
 }
 
 // RunPing handles the main "ping" command logic (non-interactive).
-func (c *PingController) RunPing(args []string, opts model.PingOptions, jsonOutput bool) {
+func (c *CLI) RunPing(args []string, opts domain.PingOptions, jsonOutput bool) {
 	if len(args) == 0 {
 		c.printer.PrintError("no URL(s) provided. Usage: cli-ping ping <url> [url2] ...")
 		os.Exit(1)
@@ -523,7 +540,7 @@ func (c *PingController) RunPing(args []string, opts model.PingOptions, jsonOutp
 }
 
 // RunCheck handles the "check" subcommand for TLS verification (non-interactive).
-func (c *PingController) RunCheck(args []string, opts model.PingOptions) {
+func (c *CLI) RunCheck(args []string, opts domain.PingOptions) {
 	if len(args) == 0 {
 		c.printer.PrintError("no URL provided. Usage: cli-ping check <url>")
 		os.Exit(1)
@@ -538,7 +555,7 @@ func (c *PingController) RunCheck(args []string, opts model.PingOptions) {
 }
 
 // RunHelp displays usage information.
-func (c *PingController) RunHelp() {
+func (c *CLI) RunHelp() {
 	c.printer.PrintBanner()
 
 	help := `
@@ -574,8 +591,8 @@ func (c *PingController) RunHelp() {
 	)
 }
 
-// ParseAndRun parses CLI arguments and routes to the appropriate handler.
-func (c *PingController) ParseAndRun() {
+// ParseAndRun é o ponto de entrada principal ao executar a ferramenta a partir da linha de comando com argumentos (flags), sem abrir o menu.
+func (c *CLI) ParseAndRun() {
 	args := os.Args[1:]
 
 	// No arguments = interactive mode
@@ -606,9 +623,9 @@ func (c *PingController) ParseAndRun() {
 	}
 }
 
-// parseFlags extracts flags and positional arguments from CLI args.
-func (c *PingController) parseFlags(args []string) (model.PingOptions, []string, bool) {
-	opts := model.DefaultPingOptions()
+// parseFlags lê os argumentos de linha de comando (`-t`, `-c`, `-i`) e os converte num objeto PingOptions utilizável.
+func (c *CLI) parseFlags(args []string) (domain.PingOptions, []string, bool) {
+	opts := domain.DefaultPingOptions()
 	urls := []string{}
 	jsonOutput := false
 
