@@ -68,6 +68,53 @@ func (s *SnifferService) MonitorTarget(
 	alertCh chan<- string,
 ) (*MonitorLog, error) {
 
+	// Auto-resolve parâmetros de rede quando não fornecidos
+	if deviceName == "" || myMAC == nil || targetMAC == nil || gatewayMAC == nil || gatewayIP == nil {
+		resolvedDevName, resolvedDevIP := s.findActiveInterface()
+		if resolvedDevName == "" {
+			return nil, fmt.Errorf("erro: não foi possível encontrar interface de rede ativa")
+		}
+		if deviceName == "" {
+			deviceName = resolvedDevName
+		}
+
+		resolvedMAC, cidr := s.getInterfaceDetails(resolvedDevIP)
+		if myMAC == nil {
+			myMAC = resolvedMAC
+		}
+
+		if gatewayIP == nil && cidr != "" {
+			gatewayIP = gatewayIPFromCIDROrOS(cidr)
+		}
+
+		if gatewayMAC == nil && gatewayIP != nil && myMAC != nil {
+			gatewayMAC = s.resolveGatewayMAC(deviceName, myMAC, net.ParseIP(resolvedDevIP), gatewayIP)
+		}
+
+		if targetMAC == nil && myMAC != nil {
+			targetMAC = s.resolveGatewayMAC(deviceName, myMAC, net.ParseIP(resolvedDevIP), net.ParseIP(targetIP))
+			if targetMAC == nil {
+				known := loadKnownDevices()
+				for macStr, dev := range known {
+					if dev.LastIP == targetIP {
+						targetMAC, _ = net.ParseMAC(macStr)
+						break
+					}
+				}
+			}
+		}
+
+		if myMAC == nil || targetMAC == nil || gatewayMAC == nil || gatewayIP == nil {
+			return nil, fmt.Errorf("erro: não foi possível resolver parâmetros de rede (myMAC=%v, targetMAC=%v, gwMAC=%v, gwIP=%v)", myMAC, targetMAC, gatewayMAC, gatewayIP)
+		}
+
+		fmt.Printf("  [*] Parâmetros de rede auto-resolvidos:\n")
+		fmt.Printf("      Interface: %s\n", deviceName)
+		fmt.Printf("      Nosso MAC: %s\n", myMAC.String())
+		fmt.Printf("      Alvo MAC:  %s\n", targetMAC.String())
+		fmt.Printf("      Gateway:   %s (MAC: %s)\n", gatewayIP.String(), gatewayMAC.String())
+	}
+
 	// Abre handle para envenenamento ARP contínuo
 	poisonHandle, err := pcap.OpenLive(deviceName, 1600, true, 100*time.Millisecond)
 	if err != nil {
@@ -111,7 +158,10 @@ func (s *SnifferService) MonitorTarget(
 			case <-ctx.Done():
 				return
 			default:
-				if blocked {
+				mu.Lock()
+				isBlocked := blocked
+				mu.Unlock()
+				if isBlocked {
 					// MODO BLOQUEIO TOTAL: envia ARPs apontando gateway para MAC inexistente (Black Hole)
 					// O alvo envia frames para de:ad:be:ef:00:01, que não existe → switch descarta tudo
 					_ = s.SendARPBlackhole(poisonHandle, targetMAC, net.ParseIP(targetIP), gatewayIP)
