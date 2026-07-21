@@ -2,7 +2,7 @@ package domain
 
 import (
 	"context"
-	"net"
+	"sync/atomic"
 	"time"
 )
 
@@ -48,11 +48,9 @@ type Sniffer interface {
 	// O parâmetro 'ctx' é usado para interromper a escuta graciosamente quando o usuário desejar.
 	SniffNetwork(ctx context.Context) error
 	// ARPSpoofMitM executa o ataque ativo de envenenamento ARP contra um IP alvo.
-	// Isso permite que o programa se torne um "Man in the Middle", interceptando tráfego.
-	ARPSpoofMitM(ctx context.Context, targetIP, manualMAC string) error
-	// MonitorTarget inicia o monitoramento defensivo contínuo de um IP alvo já anexado.
-	// Captura logs em tempo real, detecta ameaças e permite bloquear/liberar WiFi do alvo.
-	MonitorTarget(ctx context.Context, targetIP string, deviceName string, myMAC, targetMAC, gatewayMAC net.HardwareAddr, gatewayIP net.IP, blockCh <-chan bool, alertCh chan<- string) error
+	// O parâmetro showLogs controla a exibição em tempo real dos logs no terminal.
+	// Ao encerrar (ctx cancelado), gera automaticamente o log_ip.txt.
+	ARPSpoofMitM(ctx context.Context, targetIP, manualMAC string, showLogs *atomic.Bool) error
 }
 
 // Reporter define o contrato para a geração de relatórios de rede.
