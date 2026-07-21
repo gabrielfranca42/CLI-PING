@@ -219,21 +219,73 @@ func (c *CLI) runARPSpoof(scanner *bufio.Scanner) {
 	fmt.Printf("  %s[!] AVISO: Esta funcionalidade intercepta o tráfego de rede de um alvo.%s\n", view.Yellow, view.Reset)
 	fmt.Printf("  %s[!] Use APENAS em redes que você tem autorização para auditar.%s\n", view.Yellow, view.Reset)
 	fmt.Printf("  %s[!] Requer Npcap e privilégios de Administrador.%s\n", view.Yellow, view.Reset)
-	fmt.Printf("\n  Digite o IP do alvo (ex: 10.67.83.16) ou 'voltar':\n")
+	fmt.Printf("\n  Escolha uma opção:\n")
+	fmt.Printf("  %s[ 1 ]%s Anexar apenas um IP\n", view.Yellow, view.Reset)
+	fmt.Printf("  %s[ 2 ]%s Anexar vários IPs\n", view.Yellow, view.Reset)
+	fmt.Printf("  %s[ 0 ]%s Voltar\n", view.Red, view.Reset)
 	fmt.Printf("  %s%smitm > %s ", view.Bold, view.Red, view.Reset)
 
 	if !scanner.Scan() {
 		return
 	}
-	input := strings.TrimSpace(scanner.Text())
-	if input == "" || input == "voltar" {
+	option := strings.TrimSpace(scanner.Text())
+
+	var targetIPs []string
+	var manualMACs []string
+
+	if option == "0" || option == "voltar" {
+		return
+	} else if option == "1" {
+		fmt.Printf("\n  Digite o IP do alvo (ex: 10.67.83.16) ou 'voltar':\n")
+		fmt.Printf("  %s%smitm > %s ", view.Bold, view.Red, view.Reset)
+		if !scanner.Scan() {
+			return
+		}
+		ip := strings.TrimSpace(scanner.Text())
+		if ip == "" || ip == "voltar" {
+			return
+		}
+		targetIPs = append(targetIPs, ip)
+
+		fmt.Printf("\n  Digite o MAC do alvo (ex: 70:a8:d3:d1:51:91) ou ENTER para auto-resolver:\n")
+		fmt.Printf("  %s%smac > %s ", view.Bold, view.Red, view.Reset)
+		if scanner.Scan() {
+			mac := strings.TrimSpace(scanner.Text())
+			if mac != "" {
+				manualMACs = append(manualMACs, mac)
+			}
+		}
+	} else if option == "2" {
+		fmt.Printf("\n  Digite os IPs dos alvos separados por espaço (ex: 10.0.0.5 10.0.0.6) ou 'voltar':\n")
+		fmt.Printf("  %s%smitm > %s ", view.Bold, view.Red, view.Reset)
+		if !scanner.Scan() {
+			return
+		}
+		input := strings.TrimSpace(scanner.Text())
+		if input == "" || input == "voltar" {
+			return
+		}
+		targetIPs = strings.Fields(input)
+
+		fmt.Printf("\n  Digite os MACs dos alvos separados por espaço, na mesma ordem (ou ENTER para auto-resolver todos):\n")
+		fmt.Printf("  %s%smac > %s ", view.Bold, view.Red, view.Reset)
+		if scanner.Scan() {
+			macsInput := strings.TrimSpace(scanner.Text())
+			if macsInput != "" {
+				manualMACs = strings.Fields(macsInput)
+			}
+		}
+	} else {
+		c.printer.PrintError("Opção inválida.")
 		return
 	}
 
-	targetIP := input
+	if len(targetIPs) == 0 {
+		return
+	}
 
 	// Confirmação de segurança
-	fmt.Printf("\n  %s[!] Você tem certeza que deseja interceptar o tráfego de %s? (s/n):%s ", view.Red, targetIP, view.Reset)
+	fmt.Printf("\n  %s[!] Você tem certeza que deseja interceptar o tráfego de %d alvo(s)? (s/n):%s ", view.Red, len(targetIPs), view.Reset)
 	if !scanner.Scan() {
 		return
 	}
@@ -243,27 +295,25 @@ func (c *CLI) runARPSpoof(scanner *bufio.Scanner) {
 		return
 	}
 
-	// Pergunta o MAC ANTES de lançar a goroutine para evitar conflito de stdin
-	fmt.Printf("\n  Digite o MAC do alvo (ex: 70:a8:d3:d1:51:91) ou ENTER para auto-resolver:\n")
-	fmt.Printf("  %s%smac > %s ", view.Bold, view.Red, view.Reset)
-
-	var manualMAC string
-	if scanner.Scan() {
-		manualMAC = strings.TrimSpace(scanner.Text())
-	}
-
 	snifferSvc := sniffer.NewSnifferService()
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Roda o MitM em segundo plano
-	go snifferSvc.ARPSpoofMitM(ctx, targetIP, manualMAC)
+	// Roda o MitM em segundo plano para cada alvo
+	for i, ip := range targetIPs {
+		mac := ""
+		if i < len(manualMACs) {
+			mac = manualMACs[i]
+		}
+		go snifferSvc.ARPSpoofMitM(ctx, ip, mac)
+	}
 
 	// Aguarda o usuário apertar Enter para encerrar
+	fmt.Printf("\n  %s[!] Pressione ENTER para interromper o ataque e restaurar a rede.%s\n", view.Yellow, view.Reset)
 	scanner.Scan()
 	cancel()
 
 	// Aguarda a restauração da rede
-	time.Sleep(2 * time.Second)
+	time.Sleep(3 * time.Second)
 }
 
 // runRemotePortScan pede um IP ao usuário e realiza um port scan básico contra um host remoto.
