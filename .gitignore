@@ -47,4 +47,6 @@ sniffer_report_*.txt
 log_rede.txt
 known_devices.json
 log_https.txt
+log_ip.txt
+
 
