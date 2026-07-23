@@ -302,6 +302,9 @@ func (c *CLI) runARPSpoof(scanner *bufio.Scanner) {
 
 	// Flag compartilhada para controlar exibição de logs em tempo real
 	var showLogs atomic.Bool
+	
+	// Flag compartilhada para controlar bloqueio (Negar WiFi via Software Drop)
+	var isBlocked atomic.Bool
 
 	// Roda o MitM em segundo plano para cada alvo
 	for i, ip := range targetIPs {
@@ -309,7 +312,7 @@ func (c *CLI) runARPSpoof(scanner *bufio.Scanner) {
 		if i < len(manualMACs) {
 			mac = manualMACs[i]
 		}
-		go snifferSvc.ARPSpoofMitM(ctx, ip, mac, &showLogs)
+		go snifferSvc.ARPSpoofMitM(ctx, ip, mac, &showLogs, &isBlocked)
 	}
 
 	// Aguarda um momento para o ARP Spoof se estabilizar
@@ -317,31 +320,29 @@ func (c *CLI) runARPSpoof(scanner *bufio.Scanner) {
 	time.Sleep(4 * time.Second)
 
 	// === SUBMENU DE MONITORAMENTO PÓS-ANEXO ===
-	c.runMonitorMenu(scanner, snifferSvc, targetIPs, ctx, cancel, &showLogs)
+	c.runMonitorMenu(scanner, snifferSvc, targetIPs, ctx, cancel, &showLogs, &isBlocked)
 }
 
 // runMonitorMenu apresenta o submenu de monitoramento de rede após o IP ser anexado com sucesso.
 // Permite ao operador monitorar tráfego em tempo real, bloquear WiFi defensivamente e gerar logs.
-// O bloqueio usa Drop-Routing: o MitM continua atraindo pacotes, mas o Windows descarta tudo
-// porque o IP Forwarding está desativado.
-func (c *CLI) runMonitorMenu(scanner *bufio.Scanner, snifferSvc *sniffer.SnifferService, targetIPs []string, parentCtx context.Context, parentCancel context.CancelFunc, showLogs *atomic.Bool) {
-	// Estado de bloqueio local (para exibição no menu)
-	wifiBlocked := false
+// O bloqueio usa Software Drop: o MitM continua atraindo pacotes, mas o nosso Sniffer descarta tudo na memória.
+func (c *CLI) runMonitorMenu(scanner *bufio.Scanner, snifferSvc *sniffer.SnifferService, targetIPs []string, parentCtx context.Context, parentCancel context.CancelFunc, showLogs *atomic.Bool, isBlocked *atomic.Bool) {
 
 	for {
 		fmt.Printf("\n  %s%s══════════════════════════════════════════════════════════%s\n", view.Bold, view.Cyan, view.Reset)
 		fmt.Printf("  %s%s       MONITORAMENTO DE REDE — PAINEL DEFENSIVO         %s\n", view.Bold, view.Cyan, view.Reset)
 		fmt.Printf("  %s%s══════════════════════════════════════════════════════════%s\n", view.Bold, view.Cyan, view.Reset)
 		fmt.Printf("  %sIPs Anexados: %s%s\n", view.White, strings.Join(targetIPs, ", "), view.Reset)
-		if wifiBlocked {
-			fmt.Printf("  %s🛑 STATUS: BLOQUEIO TOTAL ATIVO (Drop-Routing)%s\n", view.Red, view.Reset)
+		if isBlocked.Load() {
+			fmt.Printf("  %s🛑 STATUS: BLOQUEIO TOTAL ATIVO (Software Drop)%s\n", view.Red, view.Reset)
 		} else {
 			fmt.Printf("  %s✅ STATUS: MitM ativo — Alvo(s) com internet normal%s\n", view.Green, view.Reset)
 		}
 		fmt.Printf("  %s──────────────────────────────────────────────────────────%s\n", view.Cyan, view.Reset)
-		fmt.Printf("  %s[ 1 ]%s 📡 Monitorar Tráfego (Logs em tempo real)\n", view.Yellow, view.Reset)
-		fmt.Printf("  %s[ 2 ]%s 🛑 Negar WiFi (Bloqueio TOTAL — Drop-Routing)\n", view.Yellow, view.Reset)
+		fmt.Printf("  %s[ 1 ]%s 📡 Monitorar Tráfego (Tela focada em logs)\n", view.Yellow, view.Reset)
+		fmt.Printf("  %s[ 2 ]%s 🛑 Negar WiFi (Bloqueio TOTAL — Software Drop)\n", view.Yellow, view.Reset)
 		fmt.Printf("  %s[ 3 ]%s ✅ Restaurar WiFi (Liberar acesso do alvo)\n", view.Yellow, view.Reset)
+		fmt.Printf("  %s[ 4 ]%s 👁️  Ativar/Desativar exibição de logs (Modo Livre)\n", view.Yellow, view.Reset)
 		fmt.Printf("  %s[ 0 ]%s 🔙 Encerrar MitM e Restaurar Rede (gera log_ip.txt)\n", view.Red, view.Reset)
 		fmt.Printf("  %s──────────────────────────────────────────────────────────%s\n", view.Cyan, view.Reset)
 		fmt.Printf("  %s%smonitor > %s ", view.Bold, view.Green, view.Reset)
@@ -353,10 +354,10 @@ func (c *CLI) runMonitorMenu(scanner *bufio.Scanner, snifferSvc *sniffer.Sniffer
 
 		switch input {
 		case "0", "voltar", "exit":
-			// Se estiver bloqueado, restaura IP Forwarding antes de sair
-			if wifiBlocked {
+			// Se estiver bloqueado, restaura acesso antes de sair
+			if isBlocked.Load() {
 				fmt.Printf("\n  %s[*] Restaurando acesso WiFi dos alvos antes de encerrar...%s\n", view.Yellow, view.Reset)
-				sniffer.EnableIPForwardingPublic()
+				isBlocked.Store(false)
 			}
 			// Desliga os logs antes de encerrar
 			showLogs.Store(false)
@@ -371,34 +372,49 @@ func (c *CLI) runMonitorMenu(scanner *bufio.Scanner, snifferSvc *sniffer.Sniffer
 			c.runTrafficMonitor(scanner, showLogs, targetIPs[0])
 
 		case "2":
-			// Negar WiFi — Drop-Routing: desativa IP Forwarding enquanto MitM continua ativo
+			// Negar WiFi — Software Drop: joga os pacotes no lixo na memória do Go
 			fmt.Printf("\n  %s[!] ATENÇÃO: Isso cortará TOTALMENTE o acesso à internet do(s) alvo(s).%s\n", view.Red, view.Reset)
-			fmt.Printf("  %s[!] Técnica: Drop-Routing — MitM redireciona, Windows descarta.%s\n", view.Yellow, view.Reset)
+			fmt.Printf("  %s[!] Técnica: Software Drop — O sniffer dropará os pacotes interceptados.%s\n", view.Yellow, view.Reset)
 			fmt.Printf("  %sDeseja prosseguir com o bloqueio total? (s/n):%s ", view.Bold, view.Reset)
 			if !scanner.Scan() {
 				continue
 			}
 			confirmBlock := strings.TrimSpace(strings.ToLower(scanner.Text()))
 			if confirmBlock == "s" || confirmBlock == "y" {
-				sniffer.DisableIPForwardingPublic()
-				wifiBlocked = true
+				isBlocked.Store(true)
 
 				fmt.Printf("\n  %s[🛑 BLOQUEIO TOTAL ATIVO]%s\n", view.Red, view.Reset)
-				fmt.Printf("  %s    → Técnica: Drop-Routing (IP Forwarding desativado)%s\n", view.Yellow, view.Reset)
+				fmt.Printf("  %s    → Técnica: Software Drop%s\n", view.Yellow, view.Reset)
 				fmt.Printf("  %s    → O MitM continua atraindo o tráfego do alvo.%s\n", view.Yellow, view.Reset)
-				fmt.Printf("  %s    → Windows recebe os pacotes e os descarta — bloqueio 100%% efetivo.%s\n", view.Yellow, view.Reset)
+				fmt.Printf("  %s    → O Sniffer (Ajin) está descartando pacotes na memória — bloqueio 100%% efetivo.%s\n", view.Yellow, view.Reset)
 				fmt.Printf("  %s    → Use a opção [3] para restaurar o acesso.%s\n\n", view.Cyan, view.Reset)
 			}
 
 		case "3":
-			// Restaurar WiFi — reativa IP Forwarding
-			sniffer.EnableIPForwardingPublic()
-			wifiBlocked = false
+			// Restaurar WiFi — libera pacote no sniffer
+			isBlocked.Store(false)
 
 			fmt.Printf("\n  %s[✓ RESTAURADO]%s WiFi dos alvos foi liberado.\n", view.Green, view.Reset)
-			fmt.Printf("  %s    → IP Forwarding reativado — tráfego encaminhado normalmente.%s\n", view.White, view.Reset)
+			fmt.Printf("  %s    → Software Drop desativado — tráfego sendo encaminhado normalmente.%s\n", view.White, view.Reset)
 			fmt.Printf("  %s    → MitM ainda ativo — interceptação continua.%s\n", view.White, view.Reset)
 			fmt.Printf("  %s    → O(s) alvo(s) pode(m) acessar a internet normalmente.%s\n\n", view.White, view.Reset)
+
+		case "4":
+			// Alternar a exibição de logs em background
+			currentState := showLogs.Load()
+			showLogs.Store(!currentState)
+			if !currentState {
+				fmt.Printf("\n  %s[✓] Logs em tempo real ATIVADOS no fundo.%s\n", view.Green, view.Reset)
+				fmt.Printf("  %s    → O terminal continuará aceitando comandos (ex: 2 para bloquear).%s\n\n", view.White, view.Reset)
+			} else {
+				fmt.Printf("\n  %s[✓] Logs em tempo real DESATIVADOS.%s\n\n", view.Yellow, view.Reset)
+			}
+
+		case "":
+			if showLogs.Load() {
+				showLogs.Store(false)
+				fmt.Printf("\n  %s[✓] Logs em tempo real DESATIVADOS.%s\n\n", view.Yellow, view.Reset)
+			}
 
 		default:
 			c.printer.PrintError("Opção inválida.")

