@@ -302,6 +302,7 @@ func (c *CLI) runARPSpoof(scanner *bufio.Scanner) {
 
 	// Flag compartilhada para controlar exibição de logs em tempo real
 	var showLogs atomic.Bool
+	var showTracer atomic.Bool
 	
 	// Flag compartilhada para controlar bloqueio (Negar WiFi via Software Drop)
 	var isBlocked atomic.Bool
@@ -312,7 +313,7 @@ func (c *CLI) runARPSpoof(scanner *bufio.Scanner) {
 		if i < len(manualMACs) {
 			mac = manualMACs[i]
 		}
-		go snifferSvc.ARPSpoofMitM(ctx, ip, mac, &showLogs, &isBlocked)
+		go snifferSvc.ARPSpoofMitM(ctx, ip, mac, &showLogs, &showTracer, &isBlocked)
 	}
 
 	// Aguarda um momento para o ARP Spoof se estabilizar
@@ -320,13 +321,13 @@ func (c *CLI) runARPSpoof(scanner *bufio.Scanner) {
 	time.Sleep(4 * time.Second)
 
 	// === SUBMENU DE MONITORAMENTO PÓS-ANEXO ===
-	c.runMonitorMenu(scanner, snifferSvc, targetIPs, ctx, cancel, &showLogs, &isBlocked)
+	c.runMonitorMenu(scanner, snifferSvc, targetIPs, ctx, cancel, &showLogs, &showTracer, &isBlocked)
 }
 
 // runMonitorMenu apresenta o submenu de monitoramento de rede após o IP ser anexado com sucesso.
 // Permite ao operador monitorar tráfego em tempo real, bloquear WiFi defensivamente e gerar logs.
 // O bloqueio usa Software Drop: o MitM continua atraindo pacotes, mas o nosso Sniffer descarta tudo na memória.
-func (c *CLI) runMonitorMenu(scanner *bufio.Scanner, snifferSvc *sniffer.SnifferService, targetIPs []string, parentCtx context.Context, parentCancel context.CancelFunc, showLogs *atomic.Bool, isBlocked *atomic.Bool) {
+func (c *CLI) runMonitorMenu(scanner *bufio.Scanner, snifferSvc *sniffer.SnifferService, targetIPs []string, parentCtx context.Context, parentCancel context.CancelFunc, showLogs *atomic.Bool, showTracer *atomic.Bool, isBlocked *atomic.Bool) {
 
 	for {
 		fmt.Printf("\n  %s%s══════════════════════════════════════════════════════════%s\n", view.Bold, view.Cyan, view.Reset)
@@ -361,6 +362,7 @@ func (c *CLI) runMonitorMenu(scanner *bufio.Scanner, snifferSvc *sniffer.Sniffer
 			}
 			// Desliga os logs antes de encerrar
 			showLogs.Store(false)
+			showTracer.Store(false)
 			// Encerra o MitM e restaura a rede (ARPSpoofMitM gera log_ip.txt ao encerrar)
 			fmt.Printf("\n  %s[*] Encerrando MitM e restaurando tabelas ARP...%s\n", view.Yellow, view.Reset)
 			parentCancel()
@@ -403,6 +405,7 @@ func (c *CLI) runMonitorMenu(scanner *bufio.Scanner, snifferSvc *sniffer.Sniffer
 			// Alternar a exibição de logs em background
 			currentState := showLogs.Load()
 			showLogs.Store(!currentState)
+			showTracer.Store(!currentState)
 			if !currentState {
 				fmt.Printf("\n  %s[✓] Logs em tempo real ATIVADOS no fundo.%s\n", view.Green, view.Reset)
 				fmt.Printf("  %s    → O terminal continuará aceitando comandos (ex: 2 para bloquear).%s\n\n", view.White, view.Reset)
@@ -413,6 +416,7 @@ func (c *CLI) runMonitorMenu(scanner *bufio.Scanner, snifferSvc *sniffer.Sniffer
 		case "":
 			if showLogs.Load() {
 				showLogs.Store(false)
+				showTracer.Store(false)
 				fmt.Printf("\n  %s[✓] Logs em tempo real DESATIVADOS.%s\n\n", view.Yellow, view.Reset)
 			}
 
