@@ -448,7 +448,8 @@ func (s *SnifferService) SniffNetwork(ctx context.Context) error {
 // Isso força o tráfego do alvo a passar pela nossa máquina, permitindo
 // a captura de TTL, SNI, DNS e outros dados mesmo de máquinas em Modo Furtivo.
 // O parâmetro showLogs controla a exibição em tempo real dos logs de interceptação no terminal.
-func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC string, showLogs *atomic.Bool) error {
+// O parâmetro isBlocked, quando ativo, diz ao sniffer para destruir os pacotes e bloquear a internet do alvo.
+func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC string, showLogs *atomic.Bool, isBlocked *atomic.Bool) error {
 	devices, err := pcap.FindAllDevs()
 	if err != nil {
 		log.Println("  [-] Erro ao buscar interfaces:", err)
@@ -616,6 +617,11 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 				// Data[0:6] = DstMAC | Data[6:12] = SrcMAC
 
 				if len(data) > 14 { // Garantir que temos um cabeçalho Ethernet
+					// Se o bloqueio total (Negar WiFi) estiver ativo, descarta tudo silenciosamente.
+					if isBlocked != nil && isBlocked.Load() {
+						continue
+					}
+
 					// Filtrar Echoes: Ignorar pacotes que nós mesmos acabamos de injetar
 					if bytes.Equal(data[6:12], myMAC) {
 						continue
