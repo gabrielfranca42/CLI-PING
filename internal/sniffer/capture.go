@@ -636,7 +636,9 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 						// === TRACER ICMP ===
 						// Verifica se é um pacote IPv4 (0x0800) e protocolo ICMP (1) para printar sem gerar parsing caro na rede
 						if len(data) >= 34 && data[12] == 0x08 && data[13] == 0x00 && data[23] == 1 {
-							fmt.Println("  [TRACER] 1. Recebi PING do Alvo (Target -> Attacker)")
+							if showLogs != nil && showLogs.Load() {
+								fmt.Println("  [TRACER] 1. Recebi PING do Alvo (Target -> Attacker)")
+							}
 						}
 
 						// Modifica in-place
@@ -645,7 +647,9 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 						_ = captureHandle.WritePacketData(data)
 						
 						if len(data) >= 34 && data[12] == 0x08 && data[13] == 0x00 && data[23] == 1 {
-							fmt.Println("  [TRACER] 2. Encaminhei PING para Roteador (Attacker -> Gateway)")
+							if showLogs != nil && showLogs.Load() {
+								fmt.Println("  [TRACER] 2. Encaminhei PING para Roteador (Attacker -> Gateway)")
+							}
 						}
 						forwarded = true
 					} else if isGatewaySrc && bytes.Equal(data[0:6], myMAC) { 
@@ -653,7 +657,9 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 						
 						// === TRACER ICMP ===
 						if len(data) >= 34 && data[12] == 0x08 && data[13] == 0x00 && data[23] == 1 {
-							fmt.Println("  [TRACER] 3. Recebi RESPOSTA do Roteador (Gateway -> Attacker)")
+							if showLogs != nil && showLogs.Load() {
+								fmt.Println("  [TRACER] 3. Recebi RESPOSTA do Roteador (Gateway -> Attacker)")
+							}
 						}
 
 						// O Gateway manda para nós (porque envenenamos a tabela dele).
@@ -666,7 +672,9 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 								_ = captureHandle.WritePacketData(data)
 								
 								if len(data) >= 34 && data[12] == 0x08 && data[13] == 0x00 && data[23] == 1 {
-									fmt.Println("  [TRACER] 4. Devolvi RESPOSTA para Alvo (Attacker -> Target) [ROTA OK]")
+									if showLogs != nil && showLogs.Load() {
+										fmt.Println("  [TRACER] 4. Devolvi RESPOSTA para Alvo (Attacker -> Target) [ROTA OK]")
+									}
 								}
 								forwarded = true
 							}
