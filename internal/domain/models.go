@@ -46,3 +46,53 @@ type NetworkHost struct {
 	IP        string `json:"ip"`         // Endereço IP local (IPv4) do dispositivo descoberto
 	OpenPorts []int  `json:"open_ports"` // Lista de portas abertas (TCP) encontradas nesse IP
 }
+
+// WiFiNetwork armazena informações de uma rede WiFi detectada pelo scanner.
+type WiFiNetwork struct {
+	SSID       string // Nome da rede (ex: "MinhaRede_5G")
+	BSSID      string // Endereço MAC do access point (ex: "AA:BB:CC:DD:EE:FF")
+	Signal     string // Intensidade do sinal em porcentagem (ex: "85%")
+	Channel    string // Canal da rede WiFi (ex: "6")
+	Auth       string // Tipo de autenticação (ex: "WPA2-Personal")
+	Encryption string // Tipo de cifra usada (ex: "CCMP")
+}
+
+// HashcatAttackMode define o modo de ataque do hashcat.
+type HashcatAttackMode int
+
+const (
+	// HashcatBruteForce usa máscara para testar todas as combinações possíveis (-a 3)
+	HashcatBruteForce HashcatAttackMode = 3
+	// HashcatDictionary usa um arquivo de wordlist com senhas conhecidas (-a 0)
+	HashcatDictionary HashcatAttackMode = 0
+)
+
+// HashcatCharset define quais tipos de caracteres serão usados na máscara de brute force.
+type HashcatCharset struct {
+	Digits   bool // ?d = 0-9
+	Lower    bool // ?l = a-z
+	Upper    bool // ?u = A-Z
+	Special  bool // ?s = !@#$%^&*()...
+	AllPrint bool // ?a = todos os caracteres printáveis (combina todos acima)
+}
+
+// HashcatConfig armazena a configuração completa para executar o hashcat.
+type HashcatConfig struct {
+	BinaryPath    string            // Caminho completo para o hashcat.exe
+	HandshakeFile string            // Caminho do arquivo .hc22000 (handshake capturado)
+	AttackMode    HashcatAttackMode // Modo de ataque (brute force ou dicionário)
+	Charset       HashcatCharset    // Charset para brute force (ignorado em modo dicionário)
+	MinLength     int               // Comprimento mínimo da senha (padrão: 8)
+	MaxLength     int               // Comprimento máximo da senha (padrão: 16)
+	WordlistPath  string            // Caminho do arquivo de wordlist (apenas modo dicionário)
+	RulesFile     string            // Caminho de arquivo de regras (opcional, modo dicionário)
+}
+
+// HashcatResult armazena o resultado final do hashcat após execução.
+type HashcatResult struct {
+	Found       bool   // Se a senha foi encontrada
+	Password    string // A senha encontrada (vazio se não encontrou)
+	Speed       string // Velocidade reportada (ex: "350.0 kH/s")
+	TimeElapsed string // Tempo total de execução
+	Status      string // Status final ("Cracked", "Exhausted", "Running", "Error")
+}
