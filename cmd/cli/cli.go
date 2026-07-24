@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/gabrifranca/cli_ping/internal/ping"
 	scannerPkg "github.com/gabrifranca/cli_ping/internal/scanner"
 	"github.com/gabrifranca/cli_ping/internal/sniffer"
+	"github.com/gabrifranca/cli_ping/internal/wifi"
 	"github.com/gabrifranca/cli_ping/view"
 )
 
@@ -22,6 +24,7 @@ type CLI struct {
 	service      domain.Pinger
 	extraService domain.Scanner
 	printer      *view.Printer
+	wifiService  *wifi.WiFiService
 }
 
 // NewCLI é o construtor responsável pela injeção de dependências.
@@ -31,6 +34,7 @@ func NewCLI() *CLI {
 		service:      ping.NewPingService(),
 		extraService: scannerPkg.NewExtraService(),
 		printer:      view.NewPrinter(),
+		wifiService:  wifi.NewWiFiService(),
 	}
 }
 
@@ -67,6 +71,8 @@ func (c *CLI) RunInteractive() {
 			c.runLoadTestMenu(scanner)
 		case "5":
 			c.runJWTMenu(scanner)
+		case "6":
+			c.runWiFiMenu(scanner)
 		case "clear", "cls":
 			fmt.Print("\033[H\033[2J")
 			c.printer.PrintBanner()
@@ -85,6 +91,7 @@ func (c *CLI) printMainMenu() {
   %s[ 3 ]%s Consulta DNS
   %s[ 4 ]%s Load Testing (Stress Test HTTP)
   %s[ 5 ]%s Decodificador JWT
+  %s[ 6 ]%s WiFi Auditor (Scanner + Hashcat GPU)
   %s[ 0 ]%s Sair
   ──────────────────────────────────────────────────
 `
@@ -95,6 +102,7 @@ func (c *CLI) printMainMenu() {
 		view.Yellow, view.Reset,
 		view.Yellow, view.Reset,
 		view.Yellow, view.Reset,
+		view.Magenta, view.Reset,
 		view.Red, view.Reset,
 	)
 }
@@ -1057,4 +1065,579 @@ func (c *CLI) runARPSpoofAll(scanner *bufio.Scanner) {
 
 	// 8. Navega para o painel defensivo
 	c.runMonitorMenu(scanner, snifferSvc, targetIPs, ctx, cancel, &showLogs, &showTracer, &isBlocked)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// WIFI AUDITOR — Scanner & Hashcat GPU Wrapper
+// ═══════════════════════════════════════════════════════════════════════════
+
+func (c *CLI) runWiFiMenu(scanner *bufio.Scanner) {
+	for {
+		fmt.Printf("\n  %s%s--- WiFi Auditor (Scanner + Hashcat) ---%s\n", view.Bold, view.Magenta, view.Reset)
+		fmt.Printf("  %s[!] ATENÇÃO: Use apenas em redes próprias ou com autorização.%s\n", view.Yellow, view.Reset)
+		
+		path, err := c.wifiService.FindHashcat()
+		if err != nil {
+			fmt.Printf("  %s[!] Hashcat: Não encontrado.%s\n", view.Red, view.Reset)
+		} else {
+			fmt.Printf("  %s[*] Hashcat: %s%s\n", view.Green, path, view.Reset)
+		}
+
+		submenu := `  %s[ 1 ]%s Escanear Redes WiFi Próximas
+  %s[ 2 ]%s Brute Force (Mask Attack)
+  %s[ 3 ]%s Dicionário (Wordlist Attack)
+  %s[ 4 ]%s Configurar caminho do Hashcat
+  %s[ 5 ]%s Capturar Handshake (Guia + Conversão .hc22000)
+  %s[ 0 ]%s Voltar
+`
+		fmt.Printf(submenu,
+			view.Yellow, view.Reset,
+			view.Yellow, view.Reset,
+			view.Yellow, view.Reset,
+			view.Yellow, view.Reset,
+			view.Cyan, view.Reset,
+			view.Red, view.Reset,
+		)
+		fmt.Printf("  %s%swifi >%s ", view.Bold, view.Magenta, view.Reset)
+
+		if !scanner.Scan() {
+			return
+		}
+		input := strings.TrimSpace(scanner.Text())
+
+		switch input {
+		case "0", "voltar":
+			return
+		case "1":
+			c.runWiFiScanner(scanner)
+		case "2":
+			c.runWiFiBruteForce(scanner)
+		case "3":
+			c.runWiFiDictionary(scanner)
+		case "4":
+			c.runConfigHashcat(scanner)
+		case "5":
+			c.runHandshakeCapture(scanner)
+		default:
+			c.printer.PrintError("Opção inválida.")
+		}
+	}
+}
+
+func (c *CLI) runWiFiScanner(scanner *bufio.Scanner) {
+	fmt.Printf("\n  %s[*] Escaneando redes WiFi...%s\n", view.Cyan, view.Reset)
+	
+	networks, err := c.wifiService.ScanNetworks()
+	if err != nil {
+		c.printer.PrintError(err.Error())
+		return
+	}
+
+	if len(networks) == 0 {
+		fmt.Printf("  %s[-] Nenhuma rede WiFi encontrada.%s\n", view.Yellow, view.Reset)
+		return
+	}
+
+	fmt.Printf("\n  %s%d rede(s) encontrada(s):%s\n", view.Green, len(networks), view.Reset)
+	fmt.Printf("  %-30s %-20s %-8s %-6s %-15s %-10s\n", "SSID", "BSSID", "SINAL", "CANAL", "AUTH", "ENCRYPT")
+	fmt.Printf("  %-30s %-20s %-8s %-6s %-15s %-10s\n", strings.Repeat("-", 30), strings.Repeat("-", 20), strings.Repeat("-", 8), strings.Repeat("-", 6), strings.Repeat("-", 15), strings.Repeat("-", 10))
+
+	for _, n := range networks {
+		ssid := n.SSID
+		if len(ssid) > 28 {
+			ssid = ssid[:25] + "..."
+		}
+		if ssid == "" {
+			ssid = "<Oculta>"
+		}
+		
+		fmt.Printf("  %-30s %-20s %-8s %-6s %-15s %-10s\n", 
+			ssid, n.BSSID, n.Signal, n.Channel, n.Auth, n.Encryption)
+	}
+	fmt.Println()
+}
+
+func (c *CLI) runConfigHashcat(scanner *bufio.Scanner) {
+	fmt.Printf("\n  Digite o caminho completo para o hashcat.exe:\n")
+	fmt.Printf("  Ex: C:\\Users\\gabri\\Downloads\\hashcat\\hashcat.exe\n")
+	fmt.Printf("  %s%scaminho >%s ", view.Bold, view.Magenta, view.Reset)
+	
+	if !scanner.Scan() {
+		return
+	}
+	
+	input := strings.TrimSpace(scanner.Text())
+	if input == "" || input == "voltar" {
+		return
+	}
+	
+	err := c.wifiService.SetHashcatPath(input)
+	if err != nil {
+		c.printer.PrintError(err.Error())
+	} else {
+		fmt.Printf("  %s[✓] Caminho configurado com sucesso!%s\n", view.Green, view.Reset)
+	}
+}
+
+// runHandshakeCapture guia o usuário pela captura do 4-Way Handshake WiFi.
+// Detecta ferramentas disponíveis e oferece captura automática (Linux) ou instruções manuais (Windows).
+// Após sucesso, exibe claramente o caminho do .hc22000 que o usuário precisa copiar.
+func (c *CLI) runHandshakeCapture(scanner *bufio.Scanner) {
+	fmt.Printf("\n  %s%s══════════════════════════════════════════════════════════%s\n", view.Bold, view.Cyan, view.Reset)
+	fmt.Printf("  %s%s       CAPTURA DE HANDSHAKE — WiFi Auditor               %s\n", view.Bold, view.Cyan, view.Reset)
+	fmt.Printf("  %s%s══════════════════════════════════════════════════════════%s\n", view.Bold, view.Cyan, view.Reset)
+
+	// Verifica se as ferramentas de captura nativa do Linux estão disponíveis
+	dumptool, pcapngtool, err := wifi.CheckCaptureTools()
+	isWindows := runtime.GOOS == "windows"
+
+	if err != nil && !isWindows {
+		// Linux sem ferramentas — exibe guia manual
+		fmt.Printf("\n  %s[!] %s%s\n", view.Yellow, err.Error(), view.Reset)
+		fmt.Printf("  %s[*] Exibindo guia de captura manual...%s\n\n", view.Cyan, view.Reset)
+		fmt.Println(wifi.GetCaptureInstructions())
+		
+		// Oferece conversão se o usuário já tem o .pcapng
+		fmt.Printf("\n  %sVocê já tem um arquivo .pcapng capturado para converter? (s/n):%s ", view.Bold, view.Reset)
+		if !scanner.Scan() {
+			return
+		}
+		resp := strings.ToLower(strings.TrimSpace(scanner.Text()))
+		if resp == "s" || resp == "y" {
+			c.runConvertPcapng(scanner)
+		}
+		return
+	}
+
+	// Ferramentas disponíveis ou Windows
+	if isWindows {
+		fmt.Printf("\n  %s[✓] Captura nativa Windows (via Npcap) ativada%s\n", view.Green, view.Reset)
+	} else {
+		fmt.Printf("\n  %s[✓] hcxdumptool: %s%s\n", view.Green, dumptool, view.Reset)
+		fmt.Printf("  %s[✓] hcxpcapngtool: %s%s\n", view.Green, pcapngtool, view.Reset)
+	}
+
+	for {
+		fmt.Printf("\n  %s──────────────────────────────────────────────────────────%s\n", view.Cyan, view.Reset)
+		if isWindows {
+			fmt.Printf("  %s[ 1 ]%s 📡 Capturar Handshake (Nativo Windows via Npcap)\n", view.Yellow, view.Reset)
+		} else {
+			fmt.Printf("  %s[ 1 ]%s 📡 Capturar Handshake (hcxdumptool automático)\n", view.Yellow, view.Reset)
+		}
+		fmt.Printf("  %s[ 2 ]%s 🔄 Converter .pcap/.pcapng → .hc22000 (já tenho a captura)\n", view.Yellow, view.Reset)
+		fmt.Printf("  %s[ 3 ]%s 📖 Exibir guia de captura manual\n", view.Yellow, view.Reset)
+		fmt.Printf("  %s[ 0 ]%s 🔙 Voltar\n", view.Red, view.Reset)
+		fmt.Printf("  %s──────────────────────────────────────────────────────────%s\n", view.Cyan, view.Reset)
+		fmt.Printf("  %s%scaptura >%s ", view.Bold, view.Cyan, view.Reset)
+
+		if !scanner.Scan() {
+			return
+		}
+		input := strings.TrimSpace(scanner.Text())
+
+		switch input {
+		case "0", "voltar":
+			return
+		case "1":
+			c.runAutomaticCapture(scanner)
+		case "2":
+			c.runConvertPcapng(scanner)
+		case "3":
+			fmt.Println(wifi.GetCaptureInstructions())
+		default:
+			c.printer.PrintError("Opção inválida.")
+		}
+	}
+}
+
+// runAutomaticCapture executa hcxdumptool automaticamente para capturar o handshake.
+func (c *CLI) runAutomaticCapture(scanner *bufio.Scanner) {
+	fmt.Printf("\n  %s[*] Detectando interfaces WiFi...%s\n", view.Cyan, view.Reset)
+	
+	isWindows := runtime.GOOS == "windows"
+	var selectedIfaceName string
+	var selectedIfaceDesc string
+
+	if isWindows {
+		interfaces, err := wifi.ListPcapInterfaces()
+		if err != nil || len(interfaces) == 0 {
+			c.printer.PrintError(fmt.Sprintf("Erro ao listar interfaces pcap: %v", err))
+			return
+		}
+		
+		fmt.Printf("  %sInterfaces disponíveis (Npcap):%s\n", view.Green, view.Reset)
+		for i, iface := range interfaces {
+			desc := iface.Description
+			if desc == "" {
+				desc = iface.Name
+			}
+			fmt.Printf("  %s[ %d ]%s %s\n", view.Yellow, i+1, view.Reset, desc)
+		}
+		fmt.Printf("  %sEscolha a interface (número):%s ", view.Bold, view.Reset)
+		
+		if !scanner.Scan() {
+			return
+		}
+		ifaceInput := strings.TrimSpace(scanner.Text())
+		var ifaceIdx int
+		fmt.Sscanf(ifaceInput, "%d", &ifaceIdx)
+		if ifaceIdx < 1 || ifaceIdx > len(interfaces) {
+			c.printer.PrintError("Interface inválida.")
+			return
+		}
+		selectedIfaceName = interfaces[ifaceIdx-1].Name
+		selectedIfaceDesc = interfaces[ifaceIdx-1].Description
+		if selectedIfaceDesc == "" {
+			selectedIfaceDesc = selectedIfaceName
+		}
+	} else {
+		interfaces, err := wifi.ListMonitorInterfaces()
+		if err != nil || len(interfaces) == 0 {
+			c.printer.PrintError(fmt.Sprintf("Erro ao listar interfaces: %v", err))
+			return
+		}
+		
+		fmt.Printf("  %sInterfaces disponíveis:%s\n", view.Green, view.Reset)
+		for i, iface := range interfaces {
+			fmt.Printf("  %s[ %d ]%s %s\n", view.Yellow, i+1, view.Reset, iface)
+		}
+		fmt.Printf("  %sEscolha a interface (número):%s ", view.Bold, view.Reset)
+		
+		if !scanner.Scan() {
+			return
+		}
+		ifaceInput := strings.TrimSpace(scanner.Text())
+		var ifaceIdx int
+		fmt.Sscanf(ifaceInput, "%d", &ifaceIdx)
+		if ifaceIdx < 1 || ifaceIdx > len(interfaces) {
+			c.printer.PrintError("Interface inválida.")
+			return
+		}
+		selectedIfaceName = interfaces[ifaceIdx-1]
+		selectedIfaceDesc = selectedIfaceName
+	}
+
+	// Gera caminho padrão para o arquivo de captura
+	var outputFile string
+	if isWindows {
+		outputFile = wifi.GenerateDefaultCapturePath("pcap")
+	} else {
+		outputFile = wifi.GenerateDefaultCapturePath("pcapng")
+	}
+
+	fmt.Printf("\n  %s[*] Interface selecionada: %s%s\n", view.Cyan, selectedIfaceDesc, view.Reset)
+	fmt.Printf("  %s[*] Arquivo de saída: %s%s\n", view.Cyan, outputFile, view.Reset)
+
+	fmt.Printf("\n  %s%s⚠️  ATENÇÃO:%s\n", view.Bold, view.Yellow, view.Reset)
+	fmt.Printf("  %s  • A captura requer privilégios root (sudo)%s\n", view.Yellow, view.Reset)
+	fmt.Printf("  %s  • A interface será colocada em modo monitor%s\n", view.Yellow, view.Reset)
+	fmt.Printf("  %s  • Capture por pelo menos 60 segundos para obter handshakes%s\n", view.Yellow, view.Reset)
+	fmt.Printf("  %s  • Pressione Ctrl+C neste terminal para PARAR a captura%s\n", view.Yellow, view.Reset)
+	fmt.Printf("\n  %sIniciar captura? (s/n):%s ", view.Bold, view.Reset)
+
+	if !scanner.Scan() {
+		return
+	}
+	if strings.ToLower(strings.TrimSpace(scanner.Text())) != "s" {
+		return
+	}
+
+	fmt.Printf("\n  %s[🔴 CAPTURANDO...] Ctrl+C para parar%s\n\n", view.Red, view.Reset)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	onOutput := func(line string) {
+		if line == "" {
+			return
+		}
+		fmt.Printf("  %s│%s %s\n", view.Cyan, view.Reset, line)
+	}
+
+	var err error
+	if isWindows {
+		err = wifi.RunCaptureGopacket(ctx, selectedIfaceName, outputFile, onOutput)
+	} else {
+		err = wifi.RunCapture(ctx, selectedIfaceName, outputFile, onOutput)
+	}
+
+	if err != nil {
+		c.printer.PrintError(fmt.Sprintf("Erro na captura: %v", err))
+		return
+	}
+
+	fmt.Printf("\n  %s[✓] Captura finalizada: %s%s\n", view.Green, outputFile, view.Reset)
+
+	// Pergunta se quer converter automaticamente
+	fmt.Printf("\n  %sConverter captura para .hc22000 agora? (s/n):%s ", view.Bold, view.Reset)
+	if !scanner.Scan() {
+		return
+	}
+	if strings.ToLower(strings.TrimSpace(scanner.Text())) == "s" {
+		c.convertAndShowResult(outputFile)
+	} else {
+		fmt.Printf("\n  %s[*] Para converter depois, use a opção 2 deste menu.%s\n", view.Cyan, view.Reset)
+		fmt.Printf("  %s[*] Arquivo capturado salvo em:%s\n", view.Cyan, view.Reset)
+		c.printCopyableFilePath(outputFile)
+	}
+}
+
+// runConvertPcapng converte um arquivo .pcapng existente para .hc22000.
+func (c *CLI) runConvertPcapng(scanner *bufio.Scanner) {
+	fmt.Printf("\n  %s[*] Conversão de .pcapng → .hc22000%s\n", view.Cyan, view.Reset)
+	fmt.Printf("  Digite o caminho do arquivo .pcapng (ou 'voltar'):\n")
+	fmt.Printf("  %s%spcapng >%s ", view.Bold, view.Cyan, view.Reset)
+
+	if !scanner.Scan() {
+		return
+	}
+	input := strings.TrimSpace(scanner.Text())
+	if input == "" || input == "voltar" {
+		return
+	}
+
+	if _, err := os.Stat(input); err != nil {
+		c.printer.PrintError(fmt.Sprintf("Arquivo não encontrado: %s", input))
+		return
+	}
+
+	c.convertAndShowResult(input)
+}
+
+// convertAndShowResult converte o .pcapng e exibe o resultado formatado.
+func (c *CLI) convertAndShowResult(pcapngFile string) {
+	fmt.Printf("\n  %s[*] Convertendo captura para formato Hashcat...%s\n", view.Cyan, view.Reset)
+
+	hc22000File, output, err := wifi.ConvertPcapngToHc22000(pcapngFile)
+	
+	// Mostra a saída do hcxpcapngtool (contém info sobre handshakes encontrados)
+	if output != "" {
+		fmt.Printf("\n  %s── Saída do hcxpcapngtool ──%s\n", view.White, view.Reset)
+		for _, line := range strings.Split(output, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			fmt.Printf("  %s│%s %s\n", view.White, view.Reset, line)
+		}
+		fmt.Printf("  %s────────────────────────────%s\n", view.White, view.Reset)
+	}
+
+	if err != nil {
+		c.printer.PrintError(err.Error())
+		fmt.Printf("\n  %s[!] Dica: A captura pode não ter pego nenhum 4-Way Handshake.%s\n", view.Yellow, view.Reset)
+		fmt.Printf("  %s    Tente capturar por mais tempo ou espere um dispositivo se conectar à rede.%s\n", view.Yellow, view.Reset)
+		return
+	}
+
+	// === RESULTADO DE SUCESSO — EXIBE O CAMINHO PARA COPIAR ===
+	fmt.Printf("\n  %s%s╔══════════════════════════════════════════════════════════════╗%s\n", view.Bold, view.Green, view.Reset)
+	fmt.Printf("  %s%s║           ✅ HANDSHAKE CONVERTIDO COM SUCESSO!               ║%s\n", view.Bold, view.Green, view.Reset)
+	fmt.Printf("  %s%s╠══════════════════════════════════════════════════════════════╣%s\n", view.Bold, view.Green, view.Reset)
+	fmt.Printf("  %s%s║                                                              ║%s\n", view.Bold, view.Green, view.Reset)
+	fmt.Printf("  %s%s║  📋 COPIE O CAMINHO ABAIXO para usar no Brute Force          ║%s\n", view.Bold, view.Green, view.Reset)
+	fmt.Printf("  %s%s║     ou Dicionário (opções 2 e 3 do menu WiFi):               ║%s\n", view.Bold, view.Green, view.Reset)
+	fmt.Printf("  %s%s║                                                              ║%s\n", view.Bold, view.Green, view.Reset)
+	fmt.Printf("  %s%s╚══════════════════════════════════════════════════════════════╝%s\n", view.Bold, view.Green, view.Reset)
+
+	c.printCopyableFilePath(hc22000File)
+
+	fmt.Printf("\n  %s[*] Agora volte ao menu WiFi e escolha:%s\n", view.Cyan, view.Reset)
+	fmt.Printf("  %s    → Opção 2 (Brute Force) ou Opção 3 (Dicionário)%s\n", view.Cyan, view.Reset)
+	fmt.Printf("  %s    → Cole o caminho acima quando pedir o arquivo .hc22000%s\n", view.Cyan, view.Reset)
+}
+
+// printCopyableFilePath exibe o caminho de um arquivo de forma destacada e fácil de copiar.
+func (c *CLI) printCopyableFilePath(filePath string) {
+	fmt.Printf("\n  %s┌──────────────────────────────────────────────────────────────┐%s\n", view.Yellow, view.Reset)
+	fmt.Printf("  %s│%s  %s%s%s%s\n", view.Yellow, view.Reset, view.Bold, filePath, view.Reset, "")
+	fmt.Printf("  %s└──────────────────────────────────────────────────────────────┘%s\n", view.Yellow, view.Reset)
+}
+
+func (c *CLI) getHandshakeFile(scanner *bufio.Scanner) string {
+	fmt.Printf("\n  %s[*] Passo 1: Arquivo de Handshake%s\n", view.Cyan, view.Reset)
+	fmt.Printf("  Para quebrar a senha, você precisa ter capturado o 4-Way Handshake antes.\n")
+	fmt.Printf("  %s(Não tem? Use a opção 5 do menu WiFi para capturar!)%s\n", view.Yellow, view.Reset)
+	fmt.Printf("  Digite o caminho do arquivo .hc22000 (ou 'voltar'):\n")
+	fmt.Printf("  %s%shandshake >%s ", view.Bold, view.Magenta, view.Reset)
+	
+	if !scanner.Scan() {
+		return ""
+	}
+	input := strings.TrimSpace(scanner.Text())
+	if input == "voltar" {
+		return ""
+	}
+	
+	if _, err := os.Stat(input); err != nil {
+		c.printer.PrintError(fmt.Sprintf("Arquivo não encontrado: %s", input))
+		return ""
+	}
+	
+	return input
+}
+
+func (c *CLI) runWiFiBruteForce(scanner *bufio.Scanner) {
+	hashcatPath := c.wifiService.GetHashcatPath()
+	if hashcatPath == "" {
+		c.printer.PrintError("Hashcat não configurado. Use a opção 4 primeiro.")
+		return
+	}
+
+	handshakeFile := c.getHandshakeFile(scanner)
+	if handshakeFile == "" {
+		return
+	}
+
+	config := domain.HashcatConfig{
+		BinaryPath:    hashcatPath,
+		HandshakeFile: handshakeFile,
+		AttackMode:    domain.HashcatBruteForce,
+	}
+
+	fmt.Printf("\n  %s[*] Passo 2: Configurar Charset (Caracteres permitidos)%s\n", view.Cyan, view.Reset)
+	fmt.Printf("  [ 1 ] Apenas Números (0-9)\n")
+	fmt.Printf("  [ 2 ] Letras Minúsculas (a-z)\n")
+	fmt.Printf("  [ 3 ] Letras (a-zA-Z) + Números (0-9)\n")
+	fmt.Printf("  [ 4 ] Todos os caracteres (a-zA-Z0-9!@#$)\n")
+	fmt.Printf("  %s%scharset >%s ", view.Bold, view.Magenta, view.Reset)
+	
+	if !scanner.Scan() { return }
+	charsetOpt := strings.TrimSpace(scanner.Text())
+	
+	switch charsetOpt {
+	case "1":
+		config.Charset.Digits = true
+	case "2":
+		config.Charset.Lower = true
+	case "3":
+		config.Charset.Digits = true
+		config.Charset.Lower = true
+		config.Charset.Upper = true
+	case "4":
+		config.Charset.AllPrint = true
+	default:
+		c.printer.PrintError("Opção inválida, usando padrão (Números)")
+		config.Charset.Digits = true
+	}
+
+	fmt.Printf("\n  %s[*] Passo 3: Comprimento da Senha%s\n", view.Cyan, view.Reset)
+	fmt.Printf("  Mínimo (padrão 8): ")
+	if !scanner.Scan() { return }
+	minInput := strings.TrimSpace(scanner.Text())
+	if minInput == "" { minInput = "8" }
+	fmt.Sscanf(minInput, "%d", &config.MinLength)
+	
+	fmt.Printf("  Máximo (padrão 12): ")
+	if !scanner.Scan() { return }
+	maxInput := strings.TrimSpace(scanner.Text())
+	if maxInput == "" { maxInput = "12" }
+	fmt.Sscanf(maxInput, "%d", &config.MaxLength)
+	
+	if config.MinLength < 8 { config.MinLength = 8 }
+	if config.MaxLength < config.MinLength { config.MaxLength = config.MinLength }
+
+	fmt.Printf("\n  %s[*] Configuração concluída:%s\n", view.Green, view.Reset)
+	fmt.Printf("  Charset: %s\n", wifi.GetCharsetDescription(config.Charset))
+	fmt.Printf("  Tamanho: %d a %d caracteres\n", config.MinLength, config.MaxLength)
+	
+	estimativa := wifi.EstimateCombinations(config.Charset, config.MinLength, config.MaxLength)
+	fmt.Printf("  Combinações Estimadas: ~%d\n", estimativa)
+	
+	fmt.Printf("\n  %sIniciar ataque? (s/n):%s ", view.Bold, view.Reset)
+	if !scanner.Scan() { return }
+	if strings.ToLower(strings.TrimSpace(scanner.Text())) != "s" {
+		return
+	}
+
+	c.executeHashcat(config)
+}
+
+func (c *CLI) runWiFiDictionary(scanner *bufio.Scanner) {
+	hashcatPath := c.wifiService.GetHashcatPath()
+	if hashcatPath == "" {
+		c.printer.PrintError("Hashcat não configurado. Use a opção 4 primeiro.")
+		return
+	}
+
+	handshakeFile := c.getHandshakeFile(scanner)
+	if handshakeFile == "" {
+		return
+	}
+	
+	fmt.Printf("\n  %s[*] Passo 2: Arquivo de Wordlist%s\n", view.Cyan, view.Reset)
+	fmt.Printf("  Digite o caminho para o arquivo .txt com as senhas:\n")
+	fmt.Printf("  %s%swordlist >%s ", view.Bold, view.Magenta, view.Reset)
+	
+	if !scanner.Scan() { return }
+	wordlist := strings.TrimSpace(scanner.Text())
+	
+	if _, err := os.Stat(wordlist); err != nil {
+		c.printer.PrintError(fmt.Sprintf("Arquivo não encontrado: %s", wordlist))
+		return
+	}
+	
+	config := domain.HashcatConfig{
+		BinaryPath:    hashcatPath,
+		HandshakeFile: handshakeFile,
+		AttackMode:    domain.HashcatDictionary,
+		WordlistPath:  wordlist,
+	}
+	
+	c.executeHashcat(config)
+}
+
+func (c *CLI) executeHashcat(config domain.HashcatConfig) {
+	fmt.Printf("\n  %s%s══════════════════════════════════════════════════════════%s\n", view.Bold, view.Magenta, view.Reset)
+	fmt.Printf("  %s%s       WIFI AUDITOR — HASHCAT GPU CRACKING                %s\n", view.Bold, view.Magenta, view.Reset)
+	fmt.Printf("  %s%s══════════════════════════════════════════════════════════%s\n", view.Bold, view.Magenta, view.Reset)
+	fmt.Printf("  %s[*] Iniciando Hashcat...%s\n", view.Cyan, view.Reset)
+	
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	onOutput := func(line string) {
+		// Filtra linhas vazias ou muito longas (hashes crus)
+		if line == "" || len(line) > 150 {
+			return
+		}
+		
+		// Coloriza métricas importantes
+		if strings.HasPrefix(line, "Speed.") {
+			fmt.Printf("  %s%s%s\n", view.Yellow, line, view.Reset)
+		} else if strings.HasPrefix(line, "Progress") || strings.HasPrefix(line, "Time.") {
+			fmt.Printf("  %s%s%s\n", view.Cyan, line, view.Reset)
+		} else if strings.Contains(line, ":") && !strings.Contains(line, " ") {
+			// Possível hit (senha)
+			fmt.Printf("  %s%s%s\n", view.Green, line, view.Reset)
+		} else {
+			fmt.Printf("  %s\n", line)
+		}
+	}
+
+	result, err := wifi.RunHashcat(ctx, config, onOutput)
+	
+	fmt.Printf("\n  %s%s══════════════════════════════════════════════════════════%s\n", view.Bold, view.Magenta, view.Reset)
+	
+	if err != nil {
+		c.printer.PrintError(fmt.Sprintf("Erro ao executar: %v", err))
+		return
+	}
+	
+	if result.Found {
+		fmt.Printf("  %s[🏆 SUCESSO] Senha Quebrada!%s\n", view.Bold+view.Green, view.Reset)
+		fmt.Printf("  %sSENHA:%s %s%s%s\n", view.Yellow, view.Reset, view.Bold, result.Password, view.Reset)
+	} else if result.Status == "Exhausted" {
+		fmt.Printf("  %s[❌ FALHA] Espaço de busca esgotado. Senha não encontrada.%s\n", view.Red, view.Reset)
+	} else if result.Status == "Aborted" {
+		fmt.Printf("  %s[⏸️ ABORTADO] Execução cancelada.%s\n", view.Yellow, view.Reset)
+	} else {
+		fmt.Printf("  %s[!] Execução finalizada com status: %s%s\n", view.White, result.Status, view.Reset)
+	}
+	
+	if result.TimeElapsed != "" {
+		fmt.Printf("  %sTempo Decorrido:%s %s\n", view.Cyan, view.Reset, result.TimeElapsed)
+	}
+	
+	fmt.Printf("  %s%s══════════════════════════════════════════════════════════%s\n\n", view.Bold, view.Magenta, view.Reset)
 }
