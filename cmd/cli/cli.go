@@ -224,6 +224,7 @@ func (c *CLI) runARPSpoof(scanner *bufio.Scanner) {
 	fmt.Printf("\n  Escolha uma opção:\n")
 	fmt.Printf("  %s[ 1 ]%s Anexar apenas um IP\n", view.Yellow, view.Reset)
 	fmt.Printf("  %s[ 2 ]%s Anexar vários IPs\n", view.Yellow, view.Reset)
+	fmt.Printf("  %s[ 3 ]%s TODOS os dispositivos da rede\n", view.Yellow, view.Reset)
 	fmt.Printf("  %s[ 0 ]%s Voltar\n", view.Red, view.Reset)
 	fmt.Printf("  %s%smitm > %s ", view.Bold, view.Red, view.Reset)
 
@@ -277,6 +278,9 @@ func (c *CLI) runARPSpoof(scanner *bufio.Scanner) {
 				manualMACs = strings.Fields(macsInput)
 			}
 		}
+	} else if option == "3" {
+		c.runARPSpoofAll(scanner)
+		return
 	} else {
 		c.printer.PrintError("Opção inválida.")
 		return
@@ -302,6 +306,7 @@ func (c *CLI) runARPSpoof(scanner *bufio.Scanner) {
 
 	// Flag compartilhada para controlar exibição de logs em tempo real
 	var showLogs atomic.Bool
+	var showTracer atomic.Bool
 	
 	// Flag compartilhada para controlar bloqueio (Negar WiFi via Software Drop)
 	var isBlocked atomic.Bool
@@ -312,7 +317,7 @@ func (c *CLI) runARPSpoof(scanner *bufio.Scanner) {
 		if i < len(manualMACs) {
 			mac = manualMACs[i]
 		}
-		go snifferSvc.ARPSpoofMitM(ctx, ip, mac, &showLogs, &isBlocked)
+		go snifferSvc.ARPSpoofMitM(ctx, ip, mac, &showLogs, &showTracer, &isBlocked)
 	}
 
 	// Aguarda um momento para o ARP Spoof se estabilizar
@@ -320,13 +325,13 @@ func (c *CLI) runARPSpoof(scanner *bufio.Scanner) {
 	time.Sleep(4 * time.Second)
 
 	// === SUBMENU DE MONITORAMENTO PÓS-ANEXO ===
-	c.runMonitorMenu(scanner, snifferSvc, targetIPs, ctx, cancel, &showLogs, &isBlocked)
+	c.runMonitorMenu(scanner, snifferSvc, targetIPs, ctx, cancel, &showLogs, &showTracer, &isBlocked)
 }
 
 // runMonitorMenu apresenta o submenu de monitoramento de rede após o IP ser anexado com sucesso.
 // Permite ao operador monitorar tráfego em tempo real, bloquear WiFi defensivamente e gerar logs.
 // O bloqueio usa Software Drop: o MitM continua atraindo pacotes, mas o nosso Sniffer descarta tudo na memória.
-func (c *CLI) runMonitorMenu(scanner *bufio.Scanner, snifferSvc *sniffer.SnifferService, targetIPs []string, parentCtx context.Context, parentCancel context.CancelFunc, showLogs *atomic.Bool, isBlocked *atomic.Bool) {
+func (c *CLI) runMonitorMenu(scanner *bufio.Scanner, snifferSvc *sniffer.SnifferService, targetIPs []string, parentCtx context.Context, parentCancel context.CancelFunc, showLogs *atomic.Bool, showTracer *atomic.Bool, isBlocked *atomic.Bool) {
 
 	for {
 		fmt.Printf("\n  %s%s══════════════════════════════════════════════════════════%s\n", view.Bold, view.Cyan, view.Reset)
@@ -342,7 +347,7 @@ func (c *CLI) runMonitorMenu(scanner *bufio.Scanner, snifferSvc *sniffer.Sniffer
 		fmt.Printf("  %s[ 1 ]%s 📡 Monitorar Tráfego (Tela focada em logs)\n", view.Yellow, view.Reset)
 		fmt.Printf("  %s[ 2 ]%s 🛑 Negar WiFi (Bloqueio TOTAL — Software Drop)\n", view.Yellow, view.Reset)
 		fmt.Printf("  %s[ 3 ]%s ✅ Restaurar WiFi (Liberar acesso do alvo)\n", view.Yellow, view.Reset)
-		fmt.Printf("  %s[ 4 ]%s 👁️  Ativar/Desativar exibição de logs (Modo Livre)\n", view.Yellow, view.Reset)
+		fmt.Printf("  %s[ 4 ]%s 👁️  Ativar/Desativar Tracer (Ping) em segundo plano\n", view.Yellow, view.Reset)
 		fmt.Printf("  %s[ 0 ]%s 🔙 Encerrar MitM e Restaurar Rede (gera log_ip.txt)\n", view.Red, view.Reset)
 		fmt.Printf("  %s──────────────────────────────────────────────────────────%s\n", view.Cyan, view.Reset)
 		fmt.Printf("  %s%smonitor > %s ", view.Bold, view.Green, view.Reset)
@@ -361,6 +366,7 @@ func (c *CLI) runMonitorMenu(scanner *bufio.Scanner, snifferSvc *sniffer.Sniffer
 			}
 			// Desliga os logs antes de encerrar
 			showLogs.Store(false)
+			showTracer.Store(false)
 			// Encerra o MitM e restaura a rede (ARPSpoofMitM gera log_ip.txt ao encerrar)
 			fmt.Printf("\n  %s[*] Encerrando MitM e restaurando tabelas ARP...%s\n", view.Yellow, view.Reset)
 			parentCancel()
@@ -400,19 +406,20 @@ func (c *CLI) runMonitorMenu(scanner *bufio.Scanner, snifferSvc *sniffer.Sniffer
 			fmt.Printf("  %s    → O(s) alvo(s) pode(m) acessar a internet normalmente.%s\n\n", view.White, view.Reset)
 
 		case "4":
-			// Alternar a exibição de logs em background
-			currentState := showLogs.Load()
-			showLogs.Store(!currentState)
+			// Alternar a exibição do Tracer (Ping) em background
+			currentState := showTracer.Load()
+			showTracer.Store(!currentState)
 			if !currentState {
-				fmt.Printf("\n  %s[✓] Logs em tempo real ATIVADOS no fundo.%s\n", view.Green, view.Reset)
+				fmt.Printf("\n  %s[✓] Tracer (ICMP Ping) ATIVADO no fundo.%s\n", view.Green, view.Reset)
 				fmt.Printf("  %s    → O terminal continuará aceitando comandos (ex: 2 para bloquear).%s\n\n", view.White, view.Reset)
 			} else {
-				fmt.Printf("\n  %s[✓] Logs em tempo real DESATIVADOS.%s\n\n", view.Yellow, view.Reset)
+				fmt.Printf("\n  %s[✓] Tracer (ICMP Ping) DESATIVADO.%s\n\n", view.Yellow, view.Reset)
 			}
 
 		case "":
 			if showLogs.Load() {
 				showLogs.Store(false)
+				showTracer.Store(false)
 				fmt.Printf("\n  %s[✓] Logs em tempo real DESATIVADOS.%s\n\n", view.Yellow, view.Reset)
 			}
 
@@ -855,4 +862,199 @@ func (c *CLI) parseFlags(args []string) (domain.PingOptions, []string, bool) {
 	}
 
 	return opts, urls, jsonOutput
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ALL MODE — Auto-detecção de alvos via log_rede.txt
+// ═══════════════════════════════════════════════════════════════════════════
+
+// discoveredTarget representa um dispositivo encontrado no log_rede.txt
+type discoveredTarget struct {
+	IP     string
+	MAC    string
+	Vendor string
+}
+
+// firewallVendors contém palavras-chave para identificar equipamentos de infraestrutura de rede
+var firewallVendors = []string{
+	"aruba", "cisco", "juniper", "fortinet", "palo alto",
+	"ubiquiti", "mikrotik", "sonicwall", "checkpoint", "ruckus",
+	"hewlett packard enterprise",
+}
+
+// isFirewallVendor verifica se o fabricante corresponde a um equipamento de rede/firewall
+func isFirewallVendor(vendor string) bool {
+	v := strings.ToLower(vendor)
+	for _, fw := range firewallVendors {
+		if strings.Contains(v, fw) {
+			return true
+		}
+	}
+	return false
+}
+
+// parseLogRede lê o log_rede.txt e extrai todos os dispositivos IPv4 com seus MACs e fabricantes.
+func parseLogRede() ([]discoveredTarget, error) {
+	data, err := os.ReadFile("log_rede.txt")
+	if err != nil {
+		return nil, err
+	}
+
+	lines := strings.Split(string(data), "\n")
+	var targets []discoveredTarget
+	seen := make(map[string]bool) // Dedup por IP
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if !strings.Contains(line, "- IP:") || !strings.Contains(line, "| MAC:") {
+			continue
+		}
+
+		parts := strings.Split(line, "|")
+		if len(parts) < 3 {
+			continue
+		}
+
+		// Extrai IP
+		ipPart := strings.TrimSpace(parts[0])
+		ipPart = strings.TrimPrefix(ipPart, "- IP:")
+		ip := strings.TrimSpace(ipPart)
+
+		// Ignora IPv6 (apenas IPv4 tem "." e não tem ":")
+		if !strings.Contains(ip, ".") {
+			continue
+		}
+
+		// Ignora duplicatas
+		if seen[ip] {
+			continue
+		}
+
+		// Extrai MAC
+		macPart := strings.TrimSpace(parts[1])
+		macPart = strings.TrimPrefix(macPart, "MAC:")
+		mac := strings.TrimSpace(macPart)
+
+		// Extrai Fabricante
+		vendorPart := strings.TrimSpace(parts[2])
+		vendorPart = strings.TrimPrefix(vendorPart, "Fabricante:")
+		vendor := strings.TrimSpace(vendorPart)
+
+		seen[ip] = true
+		targets = append(targets, discoveredTarget{IP: ip, MAC: mac, Vendor: vendor})
+	}
+
+	return targets, nil
+}
+
+// runARPSpoofAll lê automaticamente o log_rede.txt, filtra firewalls e gateway,
+// conecta a todos os dispositivos restantes via MitM e navega ao painel defensivo.
+func (c *CLI) runARPSpoofAll(scanner *bufio.Scanner) {
+	fmt.Printf("\n  %s%s--- ALL: Auto-Detecção de Alvos ---%s\n", view.Bold, view.Cyan, view.Reset)
+	fmt.Printf("  %s[*] Lendo log_rede.txt para descobrir dispositivos...%s\n", view.White, view.Reset)
+
+	// 1. Parse do log_rede.txt
+	allDevices, err := parseLogRede()
+	if err != nil {
+		c.printer.PrintError(fmt.Sprintf("Erro ao ler log_rede.txt: %v", err))
+		fmt.Printf("  %s[!] Execute o Modo Promíscuo (opção 4) primeiro para gerar o relatório.%s\n", view.Yellow, view.Reset)
+		return
+	}
+
+	if len(allDevices) == 0 {
+		c.printer.PrintError("Nenhum dispositivo IPv4 encontrado em log_rede.txt.")
+		fmt.Printf("  %s[!] Execute o Modo Promíscuo (opção 4) primeiro para escanear a rede.%s\n", view.Yellow, view.Reset)
+		return
+	}
+
+	// 2. Descobre nosso IP e gateway
+	localIP, err := c.extraService.GetLocalIP()
+	if err != nil {
+		c.printer.PrintError(fmt.Sprintf("Erro ao detectar IP local: %v", err))
+		return
+	}
+	gatewayBase := c.extraService.GetNetworkBase(localIP)
+	gatewayIP := gatewayBase + ".1"
+
+	// 3. Filtra: remove nosso IP, gateway e fabricantes de firewall/rede
+	var targets []discoveredTarget
+	var skipped []discoveredTarget
+
+	for _, dev := range allDevices {
+		if dev.IP == localIP {
+			skipped = append(skipped, dev)
+			continue
+		}
+		if dev.IP == gatewayIP {
+			skipped = append(skipped, dev)
+			continue
+		}
+		if isFirewallVendor(dev.Vendor) {
+			skipped = append(skipped, dev)
+			continue
+		}
+		targets = append(targets, dev)
+	}
+
+	// 4. Exibe os resultados
+	fmt.Printf("\n  %s%s══════════════════════════════════════════════════════════%s\n", view.Bold, view.Cyan, view.Reset)
+	fmt.Printf("  %s%s       ALL — DISPOSITIVOS DETECTADOS AUTOMATICAMENTE       %s\n", view.Bold, view.Cyan, view.Reset)
+	fmt.Printf("  %s%s══════════════════════════════════════════════════════════%s\n", view.Bold, view.Cyan, view.Reset)
+	fmt.Printf("  %sSeu IP: %s | Gateway: %s%s\n", view.White, localIP, gatewayIP, view.Reset)
+	fmt.Printf("  %s──────────────────────────────────────────────────────────%s\n", view.Cyan, view.Reset)
+
+	fmt.Printf("\n  %s[✓] %d alvo(s) válido(s) para MitM:%s\n", view.Green, len(targets), view.Reset)
+	for i, t := range targets {
+		fmt.Printf("  %s  %2d. %-15s | MAC: %s | %s%s\n", view.White, i+1, t.IP, t.MAC, t.Vendor, view.Reset)
+	}
+
+	if len(skipped) > 0 {
+		fmt.Printf("\n  %s[—] %d dispositivo(s) filtrado(s) (gateway/firewall/próprio):%s\n", view.Yellow, len(skipped), view.Reset)
+		for _, s := range skipped {
+			reason := "firewall"
+			if s.IP == localIP {
+				reason = "próprio"
+			} else if s.IP == gatewayIP {
+				reason = "gateway"
+			}
+			fmt.Printf("  %s      ✗ %-15s | %s (%s)%s\n", view.Yellow, s.IP, s.Vendor, reason, view.Reset)
+		}
+	}
+
+	if len(targets) == 0 {
+		c.printer.PrintError("Nenhum alvo válido encontrado após filtragem.")
+		return
+	}
+
+	// 5. Confirmação de segurança
+	fmt.Printf("\n  %s[!] Você tem certeza que deseja interceptar o tráfego de TODOS os %d alvo(s)? (s/n):%s ", view.Red, len(targets), view.Reset)
+	if !scanner.Scan() {
+		return
+	}
+	confirm := strings.TrimSpace(strings.ToLower(scanner.Text()))
+	if confirm != "s" && confirm != "y" {
+		fmt.Printf("  Operação cancelada.\n")
+		return
+	}
+
+	// 6. Lança o MitM para todos os alvos
+	snifferSvc := sniffer.NewSnifferService()
+	ctx, cancel := context.WithCancel(context.Background())
+
+	var showLogs atomic.Bool
+	var showTracer atomic.Bool
+	var isBlocked atomic.Bool
+
+	var targetIPs []string
+	for _, t := range targets {
+		targetIPs = append(targetIPs, t.IP)
+		go snifferSvc.ARPSpoofMitM(ctx, t.IP, t.MAC, &showLogs, &showTracer, &isBlocked)
+	}
+
+	// 7. Aguarda estabilização
+	fmt.Printf("\n  %s[*] Aguardando estabilização do MitM para %d alvos...%s\n", view.Cyan, len(targets), view.Reset)
+	time.Sleep(4 * time.Second)
+
+	// 8. Navega para o painel defensivo
+	c.runMonitorMenu(scanner, snifferSvc, targetIPs, ctx, cancel, &showLogs, &showTracer, &isBlocked)
 }

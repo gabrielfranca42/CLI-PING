@@ -449,7 +449,7 @@ func (s *SnifferService) SniffNetwork(ctx context.Context) error {
 // a captura de TTL, SNI, DNS e outros dados mesmo de máquinas em Modo Furtivo.
 // O parâmetro showLogs controla a exibição em tempo real dos logs de interceptação no terminal.
 // O parâmetro isBlocked, quando ativo, diz ao sniffer para destruir os pacotes e bloquear a internet do alvo.
-func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC string, showLogs *atomic.Bool, isBlocked *atomic.Bool) error {
+func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC string, showLogs *atomic.Bool, showTracer *atomic.Bool, isBlocked *atomic.Bool) error {
 	devices, err := pcap.FindAllDevs()
 	if err != nil {
 		log.Println("  [-] Erro ao buscar interfaces:", err)
@@ -636,7 +636,7 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 						// === TRACER ICMP ===
 						// Verifica se é um pacote IPv4 (0x0800) e protocolo ICMP (1) para printar sem gerar parsing caro na rede
 						if len(data) >= 34 && data[12] == 0x08 && data[13] == 0x00 && data[23] == 1 {
-							if showLogs != nil && showLogs.Load() {
+							if showTracer != nil && showTracer.Load() {
 								fmt.Println("  [TRACER] 1. Recebi PING do Alvo (Target -> Attacker)")
 							}
 						}
@@ -647,7 +647,7 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 						_ = captureHandle.WritePacketData(data)
 						
 						if len(data) >= 34 && data[12] == 0x08 && data[13] == 0x00 && data[23] == 1 {
-							if showLogs != nil && showLogs.Load() {
+							if showTracer != nil && showTracer.Load() {
 								fmt.Println("  [TRACER] 2. Encaminhei PING para Roteador (Attacker -> Gateway)")
 							}
 						}
@@ -657,7 +657,7 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 						
 						// === TRACER ICMP ===
 						if len(data) >= 34 && data[12] == 0x08 && data[13] == 0x00 && data[23] == 1 {
-							if showLogs != nil && showLogs.Load() {
+							if showTracer != nil && showTracer.Load() {
 								fmt.Println("  [TRACER] 3. Recebi RESPOSTA do Roteador (Gateway -> Attacker)")
 							}
 						}
@@ -672,7 +672,7 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 								_ = captureHandle.WritePacketData(data)
 								
 								if len(data) >= 34 && data[12] == 0x08 && data[13] == 0x00 && data[23] == 1 {
-									if showLogs != nil && showLogs.Load() {
+									if showTracer != nil && showTracer.Load() {
 										fmt.Println("  [TRACER] 4. Devolvi RESPOSTA para Alvo (Attacker -> Target) [ROTA OK]")
 									}
 								}
@@ -884,9 +884,10 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 	// Imprime no console
 	fmt.Print(sb.String())
 
-	// Salva no arquivo log_ip.txt (centralizado — único ponto de gravação)
+	// Salva no arquivo log_ip_<IP>.txt (para não sobrescrever quando houver vários alvos)
 	reporter := report.NewFileWriter()
-	_ = reporter.SaveReport("log_ip.txt", sb.String())
+	filename := fmt.Sprintf("log_ip_%s.txt", strings.ReplaceAll(targetIP, ".", "_"))
+	_ = reporter.SaveReport(filename, sb.String())
 
 	return nil
 }
