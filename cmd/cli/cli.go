@@ -347,7 +347,7 @@ func (c *CLI) runMonitorMenu(scanner *bufio.Scanner, snifferSvc *sniffer.Sniffer
 		fmt.Printf("  %s[ 1 ]%s 📡 Monitorar Tráfego (Tela focada em logs)\n", view.Yellow, view.Reset)
 		fmt.Printf("  %s[ 2 ]%s 🛑 Negar WiFi (Bloqueio TOTAL — Software Drop)\n", view.Yellow, view.Reset)
 		fmt.Printf("  %s[ 3 ]%s ✅ Restaurar WiFi (Liberar acesso do alvo)\n", view.Yellow, view.Reset)
-		fmt.Printf("  %s[ 4 ]%s 👁️  Ativar/Desativar exibição de logs (Modo Livre)\n", view.Yellow, view.Reset)
+		fmt.Printf("  %s[ 4 ]%s 👁️  Ativar/Desativar Tracer (Ping) em segundo plano\n", view.Yellow, view.Reset)
 		fmt.Printf("  %s[ 0 ]%s 🔙 Encerrar MitM e Restaurar Rede (gera log_ip.txt)\n", view.Red, view.Reset)
 		fmt.Printf("  %s──────────────────────────────────────────────────────────%s\n", view.Cyan, view.Reset)
 		fmt.Printf("  %s%smonitor > %s ", view.Bold, view.Green, view.Reset)
@@ -406,15 +406,14 @@ func (c *CLI) runMonitorMenu(scanner *bufio.Scanner, snifferSvc *sniffer.Sniffer
 			fmt.Printf("  %s    → O(s) alvo(s) pode(m) acessar a internet normalmente.%s\n\n", view.White, view.Reset)
 
 		case "4":
-			// Alternar a exibição de logs em background
-			currentState := showLogs.Load()
-			showLogs.Store(!currentState)
+			// Alternar a exibição do Tracer (Ping) em background
+			currentState := showTracer.Load()
 			showTracer.Store(!currentState)
 			if !currentState {
-				fmt.Printf("\n  %s[✓] Logs em tempo real ATIVADOS no fundo.%s\n", view.Green, view.Reset)
+				fmt.Printf("\n  %s[✓] Tracer (ICMP Ping) ATIVADO no fundo.%s\n", view.Green, view.Reset)
 				fmt.Printf("  %s    → O terminal continuará aceitando comandos (ex: 2 para bloquear).%s\n\n", view.White, view.Reset)
 			} else {
-				fmt.Printf("\n  %s[✓] Logs em tempo real DESATIVADOS.%s\n\n", view.Yellow, view.Reset)
+				fmt.Printf("\n  %s[✓] Tracer (ICMP Ping) DESATIVADO.%s\n\n", view.Yellow, view.Reset)
 			}
 
 		case "":
