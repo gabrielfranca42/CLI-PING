@@ -884,9 +884,10 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 	// Imprime no console
 	fmt.Print(sb.String())
 
-	// Salva no arquivo log_ip.txt (centralizado — único ponto de gravação)
+	// Salva no arquivo log_ip_<IP>.txt (para não sobrescrever quando houver vários alvos)
 	reporter := report.NewFileWriter()
-	_ = reporter.SaveReport("log_ip.txt", sb.String())
+	filename := fmt.Sprintf("log_ip_%s.txt", strings.ReplaceAll(targetIP, ".", "_"))
+	_ = reporter.SaveReport(filename, sb.String())
 
 	return nil
 }
