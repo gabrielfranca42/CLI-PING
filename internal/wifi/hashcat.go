@@ -75,8 +75,13 @@ func BuildMask(charset domain.HashcatCharset, length int) (mask string, customCh
 
 // BuildHashcatArgs constrói os argumentos de linha de comando para o hashcat.
 func BuildHashcatArgs(config domain.HashcatConfig) []string {
+	hashMode := config.HashMode
+	if hashMode == 0 {
+		hashMode = 22000 // Default: WPA-PBKDF2-PMKID+EAPOL (compatibilidade)
+	}
+
 	args := []string{
-		"-m", "22000", // WPA-PBKDF2-PMKID+EAPOL
+		"-m", fmt.Sprintf("%d", hashMode),
 		"-a", fmt.Sprintf("%d", config.AttackMode),
 		"--status",            // Exibe status periódico
 		"--status-timer", "5", // A cada 5 segundos
@@ -225,7 +230,7 @@ func parseLine(line string, result *domain.HashcatResult) {
 		parts := strings.Split(line, ":")
 		if len(parts) >= 2 {
 			possiblePassword := parts[len(parts)-1]
-			if len(possiblePassword) >= 8 && !strings.Contains(possiblePassword, " ") {
+			if len(possiblePassword) >= 1 && !strings.Contains(possiblePassword, " ") { // Removida restrição de 8 chars (NTLM pode ser menor)
 				result.Found = true
 				result.Password = possiblePassword
 			}
