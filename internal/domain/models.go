@@ -79,13 +79,14 @@ type HashcatCharset struct {
 // HashcatConfig armazena a configuração completa para executar o hashcat.
 type HashcatConfig struct {
 	BinaryPath    string            // Caminho completo para o hashcat.exe
-	HandshakeFile string            // Caminho do arquivo .hc22000 (handshake capturado)
+	HandshakeFile string            // Caminho do arquivo de hashes (WPA: .hc22000, NTLM: .txt)
 	AttackMode    HashcatAttackMode // Modo de ataque (brute force ou dicionário)
 	Charset       HashcatCharset    // Charset para brute force (ignorado em modo dicionário)
-	MinLength     int               // Comprimento mínimo da senha (padrão: 8)
+	MinLength     int               // Comprimento mínimo da senha (padrão: 8 para WPA, 1 para NTLM)
 	MaxLength     int               // Comprimento máximo da senha (padrão: 16)
 	WordlistPath  string            // Caminho do arquivo de wordlist (apenas modo dicionário)
 	RulesFile     string            // Caminho de arquivo de regras (opcional, modo dicionário)
+	HashMode      int               // Modo de hash do Hashcat: 22000=WPA, 1000=NTLM (0 = default 22000)
 }
 
 // HashcatResult armazena o resultado final do hashcat após execução.
