@@ -73,6 +73,8 @@ func (c *CLI) RunInteractive() {
 			c.runJWTMenu(scanner)
 		case "6":
 			c.runWiFiMenu(scanner)
+		case "7":
+			c.runSAMMenu(scanner)
 		case "clear", "cls":
 			fmt.Print("\033[H\033[2J")
 			c.printer.PrintBanner()
@@ -92,6 +94,7 @@ func (c *CLI) printMainMenu() {
   %s[ 4 ]%s Load Testing (Stress Test HTTP)
   %s[ 5 ]%s Decodificador JWT
   %s[ 6 ]%s WiFi Auditor (Scanner + Hashcat GPU)
+  %s[ 7 ]%s SAM Extractor (Dump + Crack NTLM)
   %s[ 0 ]%s Sair
   ──────────────────────────────────────────────────
 `
@@ -103,6 +106,7 @@ func (c *CLI) printMainMenu() {
 		view.Yellow, view.Reset,
 		view.Yellow, view.Reset,
 		view.Magenta, view.Reset,
+		view.Red, view.Reset,
 		view.Red, view.Reset,
 	)
 }
