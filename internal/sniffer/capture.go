@@ -37,7 +37,8 @@ type SnifferLogs struct {
 	ProtocolsCounter map[string]int            // Estatísticas de protocolos trafegados
 	HostTTL          map[string]uint8          // TTL observado por IP (para OS Fingerprinting)
 	HostOSByDNS      map[string]string         // OS detectado por Captive Portal DNS (IP -> "iOS/macOS", "Android", etc.)
-	HostNames        map[string]string         // Nomes amigáveis dos dispositivos (via mDNS/DHCP)
+	HostNames        map[string]string         // Nomes amigáveis dos dispositivos (via mDNS/DHCP/NBNS)
+	HostUsers        map[string]string         // Nomes de usuários logados (via NBNS)
 	HostOSByDHCP     map[string]string         // OS detectado via Fingerprint de DHCP (Option 55)
 	HostAccesses     map[string]map[string]int // IP -> Domínio -> Contagem de Acessos
 }
@@ -86,6 +87,7 @@ func NewSnifferLogs() *SnifferLogs {
 		HostTTL:          make(map[string]uint8),
 		HostOSByDNS:      make(map[string]string),
 		HostNames:        make(map[string]string),
+		HostUsers:        make(map[string]string),
 		HostOSByDHCP:     make(map[string]string),
 		HostAccesses:     make(map[string]map[string]int),
 	}
@@ -104,13 +106,19 @@ func (s *SnifferService) SniffNetwork(ctx context.Context) error {
 	}
 
 	// Busca a primeira interface válida (IPv4, não-loopback e não-APIPA)
-	var deviceName string
-	var deviceDesc string
-	var deviceIP string
+	var deviceName, deviceDesc, deviceIP string
+	var fallbackName, fallbackDesc, fallbackIP string
 	for _, dev := range devices {
 		for _, addr := range dev.Addresses {
 			ip := addr.IP.String()
 			if ip != "127.0.0.1" && !strings.HasPrefix(ip, "169.254.") && addr.IP.To4() != nil {
+				desc := strings.ToLower(dev.Description)
+				if strings.Contains(desc, "virtual") || strings.Contains(desc, "vmware") || strings.Contains(desc, "hyper-v") || strings.Contains(desc, "pseudo") {
+					if fallbackName == "" {
+						fallbackName, fallbackDesc, fallbackIP = dev.Name, dev.Description, ip
+					}
+					continue // Prioriza placas físicas
+				}
 				deviceName = dev.Name
 				deviceDesc = dev.Description
 				deviceIP = ip
@@ -122,8 +130,7 @@ func (s *SnifferService) SniffNetwork(ctx context.Context) error {
 		}
 	}
 	if deviceName == "" {
-		deviceName = devices[0].Name // Fallback
-		deviceDesc = devices[0].Description
+		deviceName, deviceDesc, deviceIP = fallbackName, fallbackDesc, fallbackIP // Fallback
 	}
 
 	fmt.Printf("\n  [*] Iniciando escuta passiva...\n")
@@ -458,10 +465,18 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 
 	// Descobre a interface de rede ativa
 	var deviceName, deviceDesc, deviceIP string
+	var fallbackName, fallbackDesc, fallbackIP string
 	for _, dev := range devices {
 		for _, addr := range dev.Addresses {
 			ip := addr.IP.String()
 			if ip != "127.0.0.1" && !strings.HasPrefix(ip, "169.254.") && addr.IP.To4() != nil {
+				desc := strings.ToLower(dev.Description)
+				if strings.Contains(desc, "virtual") || strings.Contains(desc, "vmware") || strings.Contains(desc, "hyper-v") || strings.Contains(desc, "pseudo") {
+					if fallbackName == "" {
+						fallbackName, fallbackDesc, fallbackIP = dev.Name, dev.Description, ip
+					}
+					continue // Prioriza placas físicas
+				}
 				deviceName = dev.Name
 				deviceDesc = dev.Description
 				deviceIP = ip
@@ -471,6 +486,9 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 		if deviceName != "" {
 			break
 		}
+	}
+	if deviceName == "" {
+		deviceName, deviceDesc, deviceIP = fallbackName, fallbackDesc, fallbackIP // Fallback
 	}
 	if deviceName == "" {
 		log.Println("  [-] Nenhuma interface válida encontrada.")

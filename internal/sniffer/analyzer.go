@@ -4,15 +4,46 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gabrifranca/cli_ping/internal/report"
+
+	"github.com/gabrifranca/cli_ping/internal/scanner"
 
 	manuf "github.com/timest/gomanuf"
 )
 
 // analyzeLogs pega a estrutura preenchida durante a captura e emite um relatÃ³rio analÃ­tico
 func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
+	// Fase de Enumeração Ativa: Para cada IP descoberto que não foi ignorado, fazer lookup NBNS
+	fmt.Println("\n  [*] Iniciando Enumeração Ativa (NBNS) nos hosts descobertos para extrair Usuários e Hostnames...")
+	extraService := scanner.NewExtraService()
+	
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
+	for ip := range logs.DiscoveredHosts {
+		// NetBIOS é tipicamente IPv4, ignoramos IPv6 para otimizar
+		if ip != "" && !strings.Contains(ip, ":") {
+			wg.Add(1)
+			go func(targetIP string) {
+				defer wg.Done()
+				nbnsResult, err := extraService.NBNSLookup(targetIP)
+				if err == nil && nbnsResult != nil {
+					mu.Lock()
+					if nbnsResult.Hostname != "" {
+						logs.HostNames[targetIP] = nbnsResult.Hostname
+					}
+					if nbnsResult.Username != "" {
+						logs.HostUsers[targetIP] = nbnsResult.Username
+					}
+					mu.Unlock()
+				}
+			}(ip)
+		}
+	}
+	wg.Wait()
 	var sb strings.Builder
 
 	sb.WriteString("\n=========================================================================\n")
@@ -206,7 +237,11 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 			if name, ok := logs.HostNames[ip]; ok && name != "" {
 				hostnameLabel = fmt.Sprintf(" (%s)", name)
 			}
-			httpsSB.WriteString(fmt.Sprintf("MÃQUINA: %s%s\n", ip, hostnameLabel))
+			userLabel := ""
+			if user, ok := logs.HostUsers[ip]; ok && user != "" {
+				userLabel = fmt.Sprintf(" | Usuário: %s", user)
+			}
+			httpsSB.WriteString(fmt.Sprintf("MÃ QUINA: %s%s%s\n", ip, hostnameLabel, userLabel))
 			httpsSB.WriteString("-------------------------------------------------------------------------\n")
 			httpsSB.WriteString(fmt.Sprintf("  - IP:                  %s\n", ip))
 
@@ -243,10 +278,6 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 			}
 			httpsSB.WriteString("\n")
 
-			if veredito == "Indeterminado" {
-				continue
-			}
-
 			// Complementa com MAC se disponÃ­vel
 			macStr := ""
 			if mac != "" {
@@ -262,13 +293,7 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 				ttlStr = fmt.Sprintf(" | TTL: %d", ttlVal)
 			}
 
-			// Adiciona o Hostname amigÃ¡vel se descoberto
-			hostname := ""
-			if name, exists := logs.HostNames[ip]; exists && name != "" {
-				hostname = fmt.Sprintf("\n          -> Nome: %s", name)
-			}
-
-			sb.WriteString(fmt.Sprintf("      - IP: %-15s | SO: %-30s | MÃ©todo: %s%s%s%s\n", ip, veredito, metodo, ttlStr, macStr, hostname))
+			sb.WriteString(fmt.Sprintf("      - IP: %-15s | SO: %-30s | MÃ©todo: %s%s%s\n", ip, veredito, metodo, ttlStr, macStr))
 		}
 
 		if dbUpdated {
@@ -327,10 +352,50 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 
 	reportContent := sb.String()
 
+	// CriaÃ§Ã£o do log_maquina.txt
+	var maquinaSB strings.Builder
+	maquinaSB.WriteString("=========================================================================\n")
+	maquinaSB.WriteString("                         AJIN - RELATORIO DE MAQUINAS                    \n")
+	maquinaSB.WriteString("=========================================================================\n\n")
+
+	hasMachines := false
+	for ip, mac := range logs.DiscoveredHosts {
+		if ip == "" {
+			continue
+		}
+		
+		name := logs.HostNames[ip]
+		user := logs.HostUsers[ip]
+		
+		// SÃ³ inclui no log se tiver alguma informaÃ§Ã£o Ãºtil de mÃ¡quina alÃ©m do IP/MAC
+		if name != "" || user != "" {
+			hasMachines = true
+			maquinaSB.WriteString(fmt.Sprintf("MAQUINA: %s\n", ip))
+			if mac != "" {
+				vendor := manuf.Search(mac)
+				if vendor == "" {
+					vendor = "Desconhecido"
+				}
+				maquinaSB.WriteString(fmt.Sprintf("  - MAC:            %s (%s)\n", mac, vendor))
+			}
+			if name != "" {
+				maquinaSB.WriteString(fmt.Sprintf("  - Hostname:       %s\n", name))
+			}
+			if user != "" {
+				maquinaSB.WriteString(fmt.Sprintf("  - Usuario Logado: %s\n", user))
+			}
+			maquinaSB.WriteString("-------------------------------------------------------------------------\n")
+		}
+	}
+	
+	if !hasMachines { 
+		maquinaSB.WriteString("Nenhuma informacao de Hostname ou Usuario foi encontrada nesta sessao.\n")
+	}
+
 	// 1. Imprime no console para o usuÃ¡rio ver
 	fmt.Print(reportContent)
 
-	// 2 e 3. Salva os relatórios delegando para o pacote report
+	// 2, 3 e 4. Salva os relatórios delegando para o pacote report
 	reporter := report.NewFileWriter()
 
 	filename := "log_rede.txt"
@@ -338,4 +403,7 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 
 	httpsFilename := "log_https.txt"
 	_ = reporter.SaveReport(httpsFilename, httpsSB.String())
+	
+	maquinaFilename := "log_maquina.txt"
+	_ = reporter.SaveReport(maquinaFilename, maquinaSB.String())
 }
