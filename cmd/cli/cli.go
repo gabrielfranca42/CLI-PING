@@ -323,13 +323,19 @@ func (c *CLI) runARPSpoof(scanner *bufio.Scanner) {
 	// Flag compartilhada para controlar bloqueio (Negar WiFi via Software Drop)
 	var isBlocked atomic.Bool
 
+	// Flags para novos modos de bloqueio
+	var rstDropPercent atomic.Int32
+	var isLagged atomic.Bool
+	var isDNSSinkhole atomic.Bool
+	var isICMPUnreachable atomic.Bool
+
 	// Roda o MitM em segundo plano para cada alvo
 	for i, ip := range targetIPs {
 		mac := ""
 		if i < len(manualMACs) {
 			mac = manualMACs[i]
 		}
-		go snifferSvc.ARPSpoofMitM(ctx, ip, mac, &showLogs, &showTracer, &isBlocked)
+		go snifferSvc.ARPSpoofMitM(ctx, ip, mac, &showLogs, &showTracer, &isBlocked, &rstDropPercent, &isLagged, &isDNSSinkhole, &isICMPUnreachable)
 	}
 
 	// Aguarda um momento para o ARP Spoof se estabilizar
@@ -337,13 +343,13 @@ func (c *CLI) runARPSpoof(scanner *bufio.Scanner) {
 	time.Sleep(4 * time.Second)
 
 	// === SUBMENU DE MONITORAMENTO PÓS-ANEXO ===
-	c.runMonitorMenu(scanner, snifferSvc, targetIPs, ctx, cancel, &showLogs, &showTracer, &isBlocked)
+	c.runMonitorMenu(scanner, snifferSvc, targetIPs, ctx, cancel, &showLogs, &showTracer, &isBlocked, &rstDropPercent, &isLagged, &isDNSSinkhole, &isICMPUnreachable)
 }
 
 // runMonitorMenu apresenta o submenu de monitoramento de rede após o IP ser anexado com sucesso.
 // Permite ao operador monitorar tráfego em tempo real, bloquear WiFi defensivamente e gerar logs.
 // O bloqueio usa Software Drop: o MitM continua atraindo pacotes, mas o nosso Sniffer descarta tudo na memória.
-func (c *CLI) runMonitorMenu(scanner *bufio.Scanner, snifferSvc *sniffer.SnifferService, targetIPs []string, parentCtx context.Context, parentCancel context.CancelFunc, showLogs *atomic.Bool, showTracer *atomic.Bool, isBlocked *atomic.Bool) {
+func (c *CLI) runMonitorMenu(scanner *bufio.Scanner, snifferSvc *sniffer.SnifferService, targetIPs []string, parentCtx context.Context, parentCancel context.CancelFunc, showLogs *atomic.Bool, showTracer *atomic.Bool, isBlocked *atomic.Bool, rstDropPercent *atomic.Int32, isLagged *atomic.Bool, isDNSSinkhole *atomic.Bool, isICMPUnreachable *atomic.Bool) {
 
 	for {
 		fmt.Printf("\n  %s%s══════════════════════════════════════════════════════════%s\n", view.Bold, view.Cyan, view.Reset)
@@ -352,12 +358,20 @@ func (c *CLI) runMonitorMenu(scanner *bufio.Scanner, snifferSvc *sniffer.Sniffer
 		fmt.Printf("  %sIPs Anexados: %s%s\n", view.White, strings.Join(targetIPs, ", "), view.Reset)
 		if isBlocked.Load() {
 			fmt.Printf("  %s🛑 STATUS: BLOQUEIO TOTAL ATIVO (Software Drop)%s\n", view.Red, view.Reset)
+		} else if rstDropPercent.Load() > 0 {
+			fmt.Printf("  %s🛑 STATUS: BLOQUEIO TCP RST ATIVO (%d%% Drop)%s\n", view.Red, rstDropPercent.Load(), view.Reset)
+		} else if isLagged.Load() {
+			fmt.Printf("  %s🐢 STATUS: LAG MODE ATIVO (Tarpit)%s\n", view.Yellow, view.Reset)
+		} else if isDNSSinkhole.Load() {
+			fmt.Printf("  %s🕸️  STATUS: DNS SINKHOLE ATIVO (Resolução de nomes bloqueada)%s\n", view.Magenta, view.Reset)
+		} else if isICMPUnreachable.Load() {
+			fmt.Printf("  %s🧱 STATUS: ICMP UNREACHABLE ATIVO (Gateway forjado)%s\n", view.Magenta, view.Reset)
 		} else {
 			fmt.Printf("  %s✅ STATUS: MitM ativo — Alvo(s) com internet normal%s\n", view.Green, view.Reset)
 		}
 		fmt.Printf("  %s──────────────────────────────────────────────────────────%s\n", view.Cyan, view.Reset)
 		fmt.Printf("  %s[ 1 ]%s 📡 Monitorar Tráfego (Tela focada em logs)\n", view.Yellow, view.Reset)
-		fmt.Printf("  %s[ 2 ]%s 🛑 Negar WiFi (Bloqueio TOTAL — Software Drop)\n", view.Yellow, view.Reset)
+		fmt.Printf("  %s[ 2 ]%s 🛑 Bloquear Tráfego (Escolher Modo)\n", view.Yellow, view.Reset)
 		fmt.Printf("  %s[ 3 ]%s ✅ Restaurar WiFi (Liberar acesso do alvo)\n", view.Yellow, view.Reset)
 		fmt.Printf("  %s[ 4 ]%s 👁️  Ativar/Desativar Tracer (Ping) em segundo plano\n", view.Yellow, view.Reset)
 		fmt.Printf("  %s[ 0 ]%s 🔙 Encerrar MitM e Restaurar Rede (gera log_ip.txt)\n", view.Red, view.Reset)
@@ -372,9 +386,13 @@ func (c *CLI) runMonitorMenu(scanner *bufio.Scanner, snifferSvc *sniffer.Sniffer
 		switch input {
 		case "0", "voltar", "exit":
 			// Se estiver bloqueado, restaura acesso antes de sair
-			if isBlocked.Load() {
+			if isBlocked.Load() || rstDropPercent.Load() > 0 || isLagged.Load() || isDNSSinkhole.Load() || isICMPUnreachable.Load() {
 				fmt.Printf("\n  %s[*] Restaurando acesso WiFi dos alvos antes de encerrar...%s\n", view.Yellow, view.Reset)
 				isBlocked.Store(false)
+				rstDropPercent.Store(0)
+				isLagged.Store(false)
+				isDNSSinkhole.Store(false)
+				isICMPUnreachable.Store(false)
 			}
 			// Desliga os logs antes de encerrar
 			showLogs.Store(false)
@@ -390,27 +408,87 @@ func (c *CLI) runMonitorMenu(scanner *bufio.Scanner, snifferSvc *sniffer.Sniffer
 			c.runTrafficMonitor(scanner, showLogs, targetIPs[0])
 
 		case "2":
-			// Negar WiFi — Software Drop: joga os pacotes no lixo na memória do Go
-			fmt.Printf("\n  %s[!] ATENÇÃO: Isso cortará TOTALMENTE o acesso à internet do(s) alvo(s).%s\n", view.Red, view.Reset)
-			fmt.Printf("  %s[!] Técnica: Software Drop — O sniffer dropará os pacotes interceptados.%s\n", view.Yellow, view.Reset)
-			fmt.Printf("  %sDeseja prosseguir com o bloqueio total? (s/n):%s ", view.Bold, view.Reset)
+			fmt.Printf("\n  %s%s--- MODOS DE BLOQUEIO ---%s\n", view.Bold, view.Red, view.Reset)
+			fmt.Printf("  %s[ 1 ]%s Bloqueio Total (Software Drop)\n", view.Yellow, view.Reset)
+			fmt.Printf("  %s[ 2 ]%s Bloqueio TCP RST (Instabilidade)\n", view.Yellow, view.Reset)
+			fmt.Printf("  %s[ 3 ]%s Lag Mode (Tarpit / Redução de Banda)\n", view.Yellow, view.Reset)
+			fmt.Printf("  %s[ 4 ]%s DNS Sinkholing (Bloqueio Furtivo de Resolução)\n", view.Yellow, view.Reset)
+			fmt.Printf("  %s[ 5 ]%s ICMP Destination Unreachable (Bloqueio no L3)\n", view.Yellow, view.Reset)
+			fmt.Printf("  %s[ 0 ]%s Cancelar\n", view.Red, view.Reset)
+			fmt.Printf("  %s%sbloqueio > %s ", view.Bold, view.Red, view.Reset)
+
 			if !scanner.Scan() {
 				continue
 			}
-			confirmBlock := strings.TrimSpace(strings.ToLower(scanner.Text()))
-			if confirmBlock == "s" || confirmBlock == "y" {
-				isBlocked.Store(true)
+			blockMode := strings.TrimSpace(scanner.Text())
 
-				fmt.Printf("\n  %s[🛑 BLOQUEIO TOTAL ATIVO]%s\n", view.Red, view.Reset)
-				fmt.Printf("  %s    → Técnica: Software Drop%s\n", view.Yellow, view.Reset)
-				fmt.Printf("  %s    → O MitM continua atraindo o tráfego do alvo.%s\n", view.Yellow, view.Reset)
-				fmt.Printf("  %s    → O Sniffer (Ajin) está descartando pacotes na memória — bloqueio 100%% efetivo.%s\n", view.Yellow, view.Reset)
-				fmt.Printf("  %s    → Use a opção [3] para restaurar o acesso.%s\n\n", view.Cyan, view.Reset)
+			switch blockMode {
+			case "1":
+				fmt.Printf("\n  %s[!] ATENÇÃO: Isso cortará TOTALMENTE o acesso à internet do(s) alvo(s).%s\n", view.Red, view.Reset)
+				fmt.Printf("  %sDeseja prosseguir com o bloqueio total? (s/n):%s ", view.Bold, view.Reset)
+				if !scanner.Scan() {
+					continue
+				}
+				confirmBlock := strings.TrimSpace(strings.ToLower(scanner.Text()))
+				if confirmBlock == "s" || confirmBlock == "y" {
+					isBlocked.Store(true)
+					rstDropPercent.Store(0)
+					isLagged.Store(false)
+					isDNSSinkhole.Store(false)
+					isICMPUnreachable.Store(false)
+					fmt.Printf("\n  %s[🛑 BLOQUEIO TOTAL ATIVO]%s\n", view.Red, view.Reset)
+				}
+			case "2":
+				fmt.Printf("\n  %sDigite a porcentagem de pacotes TCP a dropar (1-100):%s ", view.Bold, view.Reset)
+				if !scanner.Scan() {
+					continue
+				}
+				var percent int32
+				n, _ := fmt.Sscanf(strings.TrimSpace(scanner.Text()), "%d", &percent)
+				if n == 1 && percent > 0 && percent <= 100 {
+					isBlocked.Store(false)
+					rstDropPercent.Store(percent)
+					isLagged.Store(false)
+					isDNSSinkhole.Store(false)
+					isICMPUnreachable.Store(false)
+					fmt.Printf("\n  %s[🛑 BLOQUEIO TCP RST ATIVO - %d%% DROP]%s\n", view.Red, percent, view.Reset)
+				} else {
+					fmt.Printf("  %s[!] Porcentagem inválida.%s\n", view.Red, view.Reset)
+				}
+			case "3":
+				isBlocked.Store(false)
+				rstDropPercent.Store(0)
+				isLagged.Store(true)
+				isDNSSinkhole.Store(false)
+				isICMPUnreachable.Store(false)
+				fmt.Printf("\n  %s[🐢 LAG MODE ATIVO]%s\n", view.Yellow, view.Reset)
+			case "4":
+				isBlocked.Store(false)
+				rstDropPercent.Store(0)
+				isLagged.Store(false)
+				isDNSSinkhole.Store(true)
+				isICMPUnreachable.Store(false)
+				fmt.Printf("\n  %s[🕸️  DNS SINKHOLE ATIVO]%s\n", view.Magenta, view.Reset)
+			case "5":
+				isBlocked.Store(false)
+				rstDropPercent.Store(0)
+				isLagged.Store(false)
+				isDNSSinkhole.Store(false)
+				isICMPUnreachable.Store(true)
+				fmt.Printf("\n  %s[🧱 ICMP UNREACHABLE ATIVO]%s\n", view.Magenta, view.Reset)
+			case "0":
+				continue
+			default:
+				fmt.Printf("  %s[!] Opção inválida.%s\n", view.Red, view.Reset)
 			}
 
 		case "3":
 			// Restaurar WiFi — libera pacote no sniffer
 			isBlocked.Store(false)
+			rstDropPercent.Store(0)
+			isLagged.Store(false)
+			isDNSSinkhole.Store(false)
+			isICMPUnreachable.Store(false)
 
 			fmt.Printf("\n  %s[✓ RESTAURADO]%s WiFi dos alvos foi liberado.\n", view.Green, view.Reset)
 			fmt.Printf("  %s    → Software Drop desativado — tráfego sendo encaminhado normalmente.%s\n", view.White, view.Reset)
@@ -1056,11 +1134,15 @@ func (c *CLI) runARPSpoofAll(scanner *bufio.Scanner) {
 	var showLogs atomic.Bool
 	var showTracer atomic.Bool
 	var isBlocked atomic.Bool
+	var rstDropPercent atomic.Int32
+	var isLagged atomic.Bool
+	var isDNSSinkhole atomic.Bool
+	var isICMPUnreachable atomic.Bool
 
 	var targetIPs []string
 	for _, t := range targets {
 		targetIPs = append(targetIPs, t.IP)
-		go snifferSvc.ARPSpoofMitM(ctx, t.IP, t.MAC, &showLogs, &showTracer, &isBlocked)
+		go snifferSvc.ARPSpoofMitM(ctx, t.IP, t.MAC, &showLogs, &showTracer, &isBlocked, &rstDropPercent, &isLagged, &isDNSSinkhole, &isICMPUnreachable)
 	}
 
 	// 7. Aguarda estabilização
@@ -1068,7 +1150,7 @@ func (c *CLI) runARPSpoofAll(scanner *bufio.Scanner) {
 	time.Sleep(4 * time.Second)
 
 	// 8. Navega para o painel defensivo
-	c.runMonitorMenu(scanner, snifferSvc, targetIPs, ctx, cancel, &showLogs, &showTracer, &isBlocked)
+	c.runMonitorMenu(scanner, snifferSvc, targetIPs, ctx, cancel, &showLogs, &showTracer, &isBlocked, &rstDropPercent, &isLagged, &isDNSSinkhole, &isICMPUnreachable)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
