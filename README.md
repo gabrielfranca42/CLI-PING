@@ -131,11 +131,15 @@ graph TD
     E --> E1[Ping Sweep Local]
     E --> E2[TCP Connect Scan]
     
-    F --> F1[Modo Promíscuo passivo]
+    F --> F1[Modo Promiscuo passivo]
     F --> F2[ARP Spoof Ativo]
     F2 --> F3[Software Forwarding / Zero-Allocation]
-    F3 --> F4[Análise de SNI/DNS, SO Fingerprinting]
+    F3 --> F4[Analise de SNI/DNS, SO Fingerprinting]
     F3 --> F5[Bloqueio Defensivo: Blackhole/Drop]
+    F3 --> F6[DNS Sinkholing / Forja de Respostas]
+    F3 --> F7[TCP RST Injection / Quebra de Conexao]
+    F3 --> F8[ICMP Unreachable / Quebra L3]
+    F3 --> F9[Lag Mode / Tarpit]
     
     G --> G1[Scan BSSID / Monitor Mode]
     G --> G2[Pcapng -> Hc22000]
@@ -239,13 +243,15 @@ Esta seção destrincha, sob uma ótica acadêmica e de redes de computadores, o
   - Se o `analyzer.go` capta uma query DNS (UDP/53) para o domínio `msftconnecttest.com`, o fingerprinting confirma com 100% de precisão que o alvo opera Windows (devido ao NCSI - Network Connectivity Status Indicator). 
   - Se for para `captive.apple.com` e TTL 64, confirma iOS/MacOS.
 
-### 4. Buraco Negro de Rede (ARP Black Hole / Software Drop)
-**Módulo:** `internal/sniffer/network.go` | **Função:** `SendARPBlackhole`
-- **Teoria:** O *Null Routing* descarta tráfego em hardware.
-- **Implementação e Exemplo Prático:** A ferramenta injeta pacotes ARP cravando que o IP do Gateway reside no MAC inexistente `de:ad:be:ef:00:01`. 
-  - A vítima (`192.168.1.50`) tenta acessar o Google. Envia os frames para `de:ad:be:ef:00:01`.
-  - O Switch L2 analisa sua tabela CAM, não acha a porta deste MAC, faz um flood ou o descarta diretamente. A vítima sofre um isolamento furtivo da rede.
-
+### 4. Controle Defensivo Avançado (Bloqueios e Traffic Shaping)
+**Módulo:** `internal/sniffer/capture.go` e `internal/sniffer/network.go` | **Funções:** Zero-Allocation Fast Path e Forja de Pacotes
+- **Teoria:** Interromper a conectividade não se resume apenas a "derrubar" um host da rede local (*Null Routing* L2). É possível causar degradação ou interrupções furtivas na L3 e L4, manipulando pacotes interceptados *in-transit* ou forjando pacotes espúrios usando a biblioteca `gopacket`.
+- **Implementações e Exemplos Práticos:**
+  - **DNS Sinkholing:** Intercepta consultas DNS (UDP/53). O Ajin forja uma resposta DNS autoritativa dizendo que qualquer site pesquisado aponta para `127.0.0.1`. O alvo não recebe o famoso "Sem internet, conecte-se novamente", a rede permanece "conectada", porém nenhum domínio é resolvido, gerando isolamento furtivo.
+  - **TCP RST Injection (Injeção Ativa):** Inspeciona pacotes TCP. O sniffer forja um pacote TCP com a flag de *Reset* (`RST`), falsificando o IP do servidor de destino em direção ao alvo, com a janela de ACK correta. Para o sistema operacional da vítima, a própria aplicação da nuvem (ex: YouTube, Jogo) encerrou abruptamente a conexão, o que dribla firewalls que inspecionam pacotes L2. Quando atrelado a porcentagens de *drop*, gera extrema instabilidade de conexão (TCP Drops).
+  - **ICMP Destination Unreachable (L3 Drop):** Ao interceptar saída de rede, a ferramenta forja um frame `ICMP Tipo 3 Código 1` com o IP de origem do Gateway em direção ao alvo. Isso sinaliza para a vítima que "A Rota Morreu". O socket de aplicação da vítima encerra e fecha a conexão localmente na mesma hora, bem mais rápido do que um simples drop que causaria timeout prolongado.
+  - **Tarpit (Lag Induzido):** Conhecido como *Traffic Shaping*, introduz na *Goroutine* alocada um *Delay/Sleep* (ex: 100ms) imediatamente antes da injeção do pacote real para a internet. Causa latência artificial extrema (ping salta para 1000ms+), inutilizando serviços em tempo real, sem jamais de fato "derrubar" o link físico.
+  - **ARP Black Hole (Drop L2 Total):** O fluxo é cortado na fonte forçando o alvo a despejar todo o seu tráfego no MAC Address inexistente `de:ad:be:ef:00:01` via pacotes ARP forjados. O alvo perde comunicação com toda e qualquer máquina da LAN e WAN, pois os Switchs simplesmente descartarão os quadros L2.
 ### 5. Extração e Cracking de Hashes NTLM do Windows (SAM)
 **Módulo:** `internal/sam/parser.go` e `internal/wifi/hashcat.go`
 - **Teoria:** O Windows salva hashes locais de usuários (NTLM) na SAM, protegidos pela chave *SYSKEY*. O NTLM usa o algoritmo *MD4* sem adição de *salting*, sendo altamente vulnerável à aceleração GPU (Dicionário ou Força Bruta).

