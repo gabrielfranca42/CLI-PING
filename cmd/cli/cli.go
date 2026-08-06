@@ -14,6 +14,7 @@ import (
 	"github.com/gabrifranca/cli_ping/internal/ping"
 	scannerPkg "github.com/gabrifranca/cli_ping/internal/scanner"
 	"github.com/gabrifranca/cli_ping/internal/sniffer"
+	"github.com/gabrifranca/cli_ping/internal/webpentest"
 	"github.com/gabrifranca/cli_ping/internal/wifi"
 	"github.com/gabrifranca/cli_ping/view"
 )
@@ -23,6 +24,7 @@ import (
 type CLI struct {
 	service      domain.Pinger
 	extraService domain.Scanner
+	webPentester domain.WebPentester
 	printer      *view.Printer
 	wifiService  *wifi.WiFiService
 }
@@ -33,6 +35,7 @@ func NewCLI() *CLI {
 	return &CLI{
 		service:      ping.NewPingService(),
 		extraService: scannerPkg.NewExtraService(),
+		webPentester: webpentest.NewWebPentestService(),
 		printer:      view.NewPrinter(),
 		wifiService:  wifi.NewWiFiService(),
 	}
@@ -75,6 +78,8 @@ func (c *CLI) RunInteractive() {
 			c.runWiFiMenu(scanner)
 		case "7":
 			c.runSAMMenu(scanner)
+		case "8":
+			c.showWebPentestMenu()
 		case "clear", "cls":
 			fmt.Print("\033[H\033[2J")
 			c.printer.PrintBanner()
@@ -95,6 +100,7 @@ func (c *CLI) printMainMenu() {
   %s[ 5 ]%s Decodificador JWT
   %s[ 6 ]%s WiFi Auditor (Scanner + Hashcat GPU)
   %s[ 7 ]%s SAM Extractor (Dump + Crack NTLM)
+  %s[ 8 ]%s Web Pentest (SSR Fuzzer)
   %s[ 0 ]%s Sair
   ──────────────────────────────────────────────────
 `
@@ -106,6 +112,7 @@ func (c *CLI) printMainMenu() {
 		view.Yellow, view.Reset,
 		view.Yellow, view.Reset,
 		view.Magenta, view.Reset,
+		view.Red, view.Reset,
 		view.Red, view.Reset,
 		view.Red, view.Reset,
 	)
