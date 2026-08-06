@@ -59,3 +59,17 @@ type Reporter interface {
 	// SaveReport escreve o conteúdo gerado em um arquivo físico no disco.
 	SaveReport(filename, content string) error
 }
+
+// WebPentester define os métodos para pentest em aplicações web SSR.
+type WebPentester interface {
+	// Recon faz reconhecimento inicial do alvo: extrai headers, tecnologias, tokens e cookies.
+	Recon(target WebPentestTarget) (WebPentestResult, error)
+	// ExtractToken faz GET na página e extrai o valor atual do token de segurança (ssvtoken, __VIEWSTATE, etc.)
+	ExtractToken(target WebPentestTarget) (string, []string, error)
+	// TestLogin simula um POST de login com credenciais e token, analisando a resposta.
+	TestLogin(target WebPentestTarget, login string, token string, cookies []string) (WebPentestResult, error)
+	// FuzzField executa fuzzing automatizado em um campo do formulário, com rate limiting.
+	FuzzField(config WebFuzzConfig, onResult func(WebPentestResult)) []WebPentestResult
+	// AnalyzeHeaders inspeciona os headers de resposta em busca de problemas de segurança.
+	AnalyzeHeaders(target WebPentestTarget) (map[string]string, []string)
+}
