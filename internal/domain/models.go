@@ -97,3 +97,39 @@ type HashcatResult struct {
 	TimeElapsed string // Tempo total de execução
 	Status      string // Status final ("Cracked", "Exhausted", "Running", "Error")
 }
+
+// WebPentestTarget armazena as configurações de um alvo web SSR.
+type WebPentestTarget struct {
+	BaseURL       string            // URL base do alvo (ex: https://pesquisa.senac.br)
+	LoginEndpoint string            // Path do POST de login (ex: /questionario.htm)
+	TokenField    string            // Nome do campo de token (ex: ssvtoken)
+	LoginField    string            // Nome do campo de login (ex: Login)
+	Method        string            // HTTP method (default: POST)
+	Headers       map[string]string // Headers customizados (User-Agent, Referer, etc.)
+	Timeout       time.Duration     // Timeout por requisição
+}
+
+// WebPentestResult armazena o resultado de uma tentativa de pentest web.
+type WebPentestResult struct {
+	TargetURL      string        // URL testada
+	StatusCode     int           // HTTP status code recebido
+	ResponseSize   int           // Tamanho da resposta em bytes
+	Latency        time.Duration // Tempo de resposta
+	TokenExtracted string        // Token extraído da página (se houver)
+	LoginTested    string        // Login/credencial testada
+	Success        bool          // Se o login/ação foi bem-sucedido
+	ErrorMsg       string        // Mensagem de erro (se houver)
+	Timestamp      time.Time     // Momento do teste
+	RedirectURL    string        // URL de redirecionamento (se 3xx)
+	SetCookies     []string      // Cookies definidos pelo servidor
+}
+
+// WebFuzzConfig configura o fuzzing automatizado de campos em formulários SSR.
+type WebFuzzConfig struct {
+	Target         WebPentestTarget // Alvo
+	Payloads       []string         // Lista de payloads a testar
+	FieldToFuzz    string           // Campo do formulário a ser testado
+	Concurrency    int              // Número de goroutines simultâneas
+	DelayMs        int              // Delay entre requisições (anti-rate-limit)
+	FollowRedirect bool             // Seguir redirecionamentos
+}
