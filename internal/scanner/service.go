@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os/exec"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -242,9 +244,50 @@ func decodeBase64Segment(seg string) (string, error) {
 	}
 
 	prettyJSON, err := json.MarshalIndent(parsed, "", "  ")
-	if err != nil {
-		return string(data), nil
+	return string(prettyJSON), nil
+}
+
+// 9. DiagnoseNetwork executa um teste de rede usando comandos do sistema para descobrir latência, perdas e caminho (traceroute).
+func (s *ExtraService) DiagnoseNetwork(target string) domain.NetworkDiagnosticResult {
+	result := domain.NetworkDiagnosticResult{
+		Target:    target,
+		Timestamp: time.Now(),
 	}
 
-	return string(prettyJSON), nil
+	isWindows := runtime.GOOS == "windows"
+
+	// --- 1. PING (Latência e Perda) ---
+	var pingCmd *exec.Cmd
+	if isWindows {
+		pingCmd = exec.Command("ping", "-n", "4", target)
+	} else {
+		pingCmd = exec.Command("ping", "-c", "4", target)
+	}
+	
+	pingOutput, err := pingCmd.CombinedOutput()
+	if err != nil && len(pingOutput) == 0 {
+		result.RawPing = fmt.Sprintf("Erro ao executar ping: %v", err)
+	} else {
+		result.RawPing = string(pingOutput)
+	}
+
+	// --- 2. TRACEROUTE (Caminho e Gargalos) ---
+	var traceCmd *exec.Cmd
+	if isWindows {
+		// -d: não resolve DNS (mais rápido)
+		// -w: timeout 1000ms
+		// -h: max 30 hops
+		traceCmd = exec.Command("tracert", "-d", "-w", "1000", "-h", "30", target)
+	} else {
+		traceCmd = exec.Command("traceroute", "-n", "-w", "1", "-m", "30", target)
+	}
+
+	traceOutput, err := traceCmd.CombinedOutput()
+	if err != nil && len(traceOutput) == 0 {
+		result.RawTracert = fmt.Sprintf("Erro ao executar traceroute: %v", err)
+	} else {
+		result.RawTracert = string(traceOutput)
+	}
+
+	return result
 }
