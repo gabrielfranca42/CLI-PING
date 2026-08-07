@@ -133,3 +133,11 @@ type WebFuzzConfig struct {
 	DelayMs        int              // Delay entre requisições (anti-rate-limit)
 	FollowRedirect bool             // Seguir redirecionamentos
 }
+
+// NetworkDiagnosticResult armazena o resultado do diagnóstico completo da rede.
+type NetworkDiagnosticResult struct {
+	Target      string    // Alvo analisado (IP ou Domínio)
+	RawPing     string    // Saída bruta do comando ping (latência e perda de pacotes)
+	RawTracert  string    // Saída bruta do comando tracert/traceroute (caminho e gargalos)
+	Timestamp   time.Time // Momento da análise
+}

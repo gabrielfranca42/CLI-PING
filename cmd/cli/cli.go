@@ -80,6 +80,8 @@ func (c *CLI) RunInteractive() {
 			c.runSAMMenu(scanner)
 		case "8":
 			c.showWebPentestMenu()
+		case "9":
+			c.runDiagnoseMenu(scanner)
 		case "clear", "cls":
 			fmt.Print("\033[H\033[2J")
 			c.printer.PrintBanner()
@@ -101,6 +103,7 @@ func (c *CLI) printMainMenu() {
   %s[ 6 ]%s WiFi Auditor (Scanner + Hashcat GPU)
   %s[ 7 ]%s SAM Extractor (Dump + Crack NTLM)
   %s[ 8 ]%s Web Pentest (SSR Fuzzer)
+  %s[ 9 ]%s Diagnóstico de Rede (Latência + Traceroute)
   %s[ 0 ]%s Sair
   ──────────────────────────────────────────────────
 `
@@ -114,8 +117,36 @@ func (c *CLI) printMainMenu() {
 		view.Magenta, view.Reset,
 		view.Red, view.Reset,
 		view.Red, view.Reset,
+		view.Yellow, view.Reset,
 		view.Red, view.Reset,
 	)
+}
+
+// runDiagnoseMenu controla o submenu de diagnóstico avançado de rede.
+func (c *CLI) runDiagnoseMenu(scanner *bufio.Scanner) {
+	fmt.Printf("\n  %s%s--- Diagnóstico de Rede (Latência + Rota) ---%s\n", view.Bold, view.Cyan, view.Reset)
+	fmt.Printf("  Digite a URL ou IP do alvo (ex: google.com) ou 'voltar':\n")
+	fmt.Printf("  %s%sdiag >%s ", view.Bold, view.Green, view.Reset)
+
+	if !scanner.Scan() {
+		return
+	}
+
+	input := strings.TrimSpace(scanner.Text())
+	if input == "" || input == "voltar" {
+		return
+	}
+
+	fmt.Printf("\n  %s[*] Iniciando diagnóstico para %s... (isso pode levar alguns segundos)%s\n\n", view.Yellow, input, view.Reset)
+	
+	result := c.extraService.DiagnoseNetwork(input)
+
+	fmt.Printf("  %s%s[ RESULTADO DO PING (Latência e Perda) ]%s\n", view.Bold, view.Cyan, view.Reset)
+	fmt.Printf("%s\n", result.RawPing)
+
+	fmt.Printf("  %s%s[ RESULTADO DO TRACEROUTE (Caminho e Gargalos) ]%s\n", view.Bold, view.Cyan, view.Reset)
+	fmt.Printf("%s\n", result.RawTracert)
+	fmt.Println()
 }
 
 // runPingMenu controla o submenu responsável por Testes de Conectividade (Ping e TLS).

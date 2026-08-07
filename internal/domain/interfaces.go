@@ -39,6 +39,8 @@ type Scanner interface {
 	LoadTest(url string, totalRequests, concurrency int) (int, int, time.Duration)
 	// DecodeJWT decodifica as partes (Header e Payload) de um token JWT sem validar a assinatura.
 	DecodeJWT(token string) (string, string, error)
+	// DiagnoseNetwork executa um teste completo (Ping + Traceroute) para diagnosticar problemas de latência e rota.
+	DiagnoseNetwork(target string) NetworkDiagnosticResult
 }
 
 // Sniffer define os métodos necessários para interagir com o tráfego de baixo nível da rede.
