@@ -377,7 +377,7 @@ func (c *CLI) runARPSpoof(scanner *bufio.Scanner) {
 		if i < len(manualMACs) {
 			mac = manualMACs[i]
 		}
-		go snifferSvc.ARPSpoofMitM(ctx, ip, mac, &showLogs, &showTracer, &isBlocked, &rstDropPercent, &isLagged, &isDNSSinkhole, &isICMPUnreachable, &wpadFileInjection, wpadServerAddr)
+		go snifferSvc.ARPSpoofMitM(ctx, ip, mac, &showLogs, &showTracer, &isBlocked, &rstDropPercent, &isLagged, &isDNSSinkhole, &isICMPUnreachable, &wpadFileInjection, &wpadServerAddr)
 	}
 
 	// Aguarda um momento para o ARP Spoof se estabilizar
@@ -1284,7 +1284,7 @@ func (c *CLI) runARPSpoofAll(scanner *bufio.Scanner) {
 
 	for _, t := range targets {
 		targetIPs = append(targetIPs, t.IP)
-		go snifferSvc.ARPSpoofMitM(ctx, t.IP, t.MAC, &showLogs, &showTracer, &isBlocked, &rstDropPercent, &isLagged, &isDNSSinkhole, &isICMPUnreachable, &wpadFileInjection, wpadServerAddr)
+		go snifferSvc.ARPSpoofMitM(ctx, t.IP, t.MAC, &showLogs, &showTracer, &isBlocked, &rstDropPercent, &isLagged, &isDNSSinkhole, &isICMPUnreachable, &wpadFileInjection, &wpadServerAddr)
 	}
 
 	// 7. Aguarda estabilização
