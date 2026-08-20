@@ -11,6 +11,8 @@ type OSINTHostResult struct {
 	Vulns        []OSINTVulnerability `json:"vulns"`
 	Hostnames    []string             `json:"hostnames"`
 	Tags         []string             `json:"tags"`
+	ScoreOutbound string              `json:"score_outbound"`
+	SearchCount   int                 `json:"search_count"`
 }
 
 // OSINTServicePort representa um serviço rodando em uma porta específica.
@@ -28,6 +30,7 @@ type OSINTVulnerability struct {
 	ID          string `json:"id"`          // CVE-2021-1234 ou nome do Leak
 	Description string `json:"description"` // Detalhes rápidos
 	Severity    string `json:"severity"`    // High, Medium, Low
+	CWEName     string `json:"cwe_name"`    // ex: "Out-of-bounds Read"
 }
 
 // OSINTSearchMatch representa um dispositivo encontrado na busca global.
