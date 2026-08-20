@@ -123,6 +123,18 @@ func (c *CLI) printOSINTHostResult(result *osint.OSINTHostResult) {
 		fmt.Printf("  %sPaís:%s         %s\n", view.White, view.Reset, result.Country)
 	}
 
+	if len(result.Hostnames) > 0 {
+		fmt.Printf("  %sDomínios:%s     %s\n", view.White, view.Reset, strings.Join(result.Hostnames, ", "))
+	}
+
+	if result.ScoreOutbound != "" {
+		fmt.Printf("  %sOutbound:%s     %s\n", view.White, view.Reset, result.ScoreOutbound)
+	}
+
+	if result.SearchCount > 0 {
+		fmt.Printf("  %sBuscas:%s       %d vezes na plataforma\n", view.White, view.Reset, result.SearchCount)
+	}
+
 	if len(result.Tags) > 0 {
 		fmt.Printf("  %sTags:%s         %s\n", view.White, view.Reset, strings.Join(result.Tags, ", "))
 	}
@@ -138,9 +150,18 @@ func (c *CLI) printOSINTHostResult(result *osint.OSINTHostResult) {
 	if len(result.Vulns) > 0 {
 		fmt.Printf("\n  %s%s── Vulnerabilidades / Vazamentos (%d) ──%s\n", view.Bold, view.Red, len(result.Vulns), view.Reset)
 		for _, v := range result.Vulns {
-			fmt.Printf("  %s  🔴 [%s] %s%s\n", view.Red, v.Severity, v.ID, view.Reset)
+			fmt.Printf("  %s  🔴 [%s] %s%s", view.Red, v.Severity, v.ID, view.Reset)
+			if v.CWEName != "" {
+				fmt.Printf(" %s(%s)%s\n", view.Yellow, v.CWEName, view.Reset)
+			} else {
+				fmt.Println()
+			}
+			
 			if v.Description != "" {
-				fmt.Printf("  %s      %s%s\n", view.Dim, v.Description, view.Reset)
+				desc := v.Description
+				// Remove as quebras de linha da descrição para não estragar a formatação
+				desc = strings.ReplaceAll(desc, "\n", " ")
+				fmt.Printf("      %s%s%s\n", view.Dim, desc, view.Reset)
 			}
 		}
 	}
