@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -77,16 +78,33 @@ func (p *LeakIXProvider) HostLookup(ip string) (*OSINTHostResult, error) {
 	var resp struct {
 		IP       string `json:"ip"`
 		Services []struct {
-			Port     int    `json:"port"`
+			Port     any    `json:"port"`
 			Protocol string `json:"protocol"`
-			Software struct {
-				Name    string `json:"name"`
-				Version string `json:"version"`
-			} `json:"software"`
+			Service  struct {
+				Software struct {
+					Name    string `json:"name"`
+					Version string `json:"version"`
+				} `json:"software"`
+			} `json:"service"`
+			GeoIP struct {
+				CountryName string `json:"country_name"`
+				CityName    string `json:"city_name"`
+			} `json:"geoip"`
+			Network struct {
+				OrganizationName string `json:"organization_name"`
+				Asn              int    `json:"asn"`
+			} `json:"network"`
 		} `json:"services"`
 		Leaks []struct {
-			Plugin  string `json:"plugin"`
-			Dataset string `json:"dataset"`
+			Events []struct {
+				EventSource string   `json:"event_source"`
+				Summary     string   `json:"summary"`
+				Tags        []string `json:"tags"`
+				Leak        struct {
+					Severity string `json:"severity"`
+					Type     string `json:"type"`
+				} `json:"leak"`
+			} `json:"events"`
 		} `json:"leaks"`
 	}
 
@@ -100,20 +118,66 @@ func (p *LeakIXProvider) HostLookup(ip string) (*OSINTHostResult, error) {
 	}
 
 	for _, srv := range resp.Services {
+		var portInt int
+		switch v := srv.Port.(type) {
+		case float64:
+			portInt = int(v)
+		case string:
+			fmt.Sscanf(v, "%d", &portInt)
+		}
+
 		result.Services = append(result.Services, OSINTServicePort{
-			Port:      srv.Port,
+			Port:      portInt,
 			Transport: srv.Protocol,
-			Product:   srv.Software.Name,
-			Version:   srv.Software.Version,
+			Product:   srv.Service.Software.Name,
+			Version:   srv.Service.Software.Version,
 		})
+
+		// Preenche Org e Country caso ainda não tenha preenchido
+		if result.Country == "" && srv.GeoIP.CountryName != "" {
+			result.Country = srv.GeoIP.CountryName
+		}
+		if result.City == "" && srv.GeoIP.CityName != "" {
+			result.City = srv.GeoIP.CityName
+		}
+		if result.Organization == "" && srv.Network.OrganizationName != "" {
+			if srv.Network.Asn != 0 {
+				result.Organization = fmt.Sprintf("%s (AS%d)", srv.Network.OrganizationName, srv.Network.Asn)
+			} else {
+				result.Organization = srv.Network.OrganizationName
+			}
+		}
 	}
 
-	for _, leak := range resp.Leaks {
-		result.Vulns = append(result.Vulns, OSINTVulnerability{
-			ID:          leak.Plugin,
-			Description: leak.Dataset,
-			Severity:    "High",
-		})
+	for _, leakGroup := range resp.Leaks {
+		for _, event := range leakGroup.Events {
+			// Normaliza a severidade
+			sev := "Low"
+			switch strings.ToLower(event.Leak.Severity) {
+			case "critical":
+				sev = "Critical"
+			case "high":
+				sev = "High"
+			case "medium":
+				sev = "Medium"
+			}
+
+			// Prepara CWEs se tiver nas tags
+			cwe := ""
+			for _, t := range event.Tags {
+				if strings.HasPrefix(strings.ToLower(t), "cwe-") {
+					cwe = strings.ToUpper(t)
+					break
+				}
+			}
+
+			result.Vulns = append(result.Vulns, OSINTVulnerability{
+				ID:          event.EventSource,
+				Description: event.Summary,
+				Severity:    sev,
+				CWEName:     cwe,
+			})
+		}
 	}
 
 	return result, nil
