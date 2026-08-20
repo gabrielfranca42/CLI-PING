@@ -81,6 +81,19 @@ func (p *CriminalIPProvider) HostLookup(ip string) (*OSINTHostResult, error) {
 			Inbound  string `json:"inbound"`
 			Outbound string `json:"outbound"`
 		} `json:"score"`
+		UserSearchCount int `json:"user_search_count"`
+		Issues struct {
+			IsVPN     bool `json:"is_vpn"`
+			IsCloud   bool `json:"is_cloud"`
+			IsTor     bool `json:"is_tor"`
+			IsProxy   bool `json:"is_proxy"`
+			IsScanner bool `json:"is_scanner"`
+		} `json:"issues"`
+		Domain struct {
+			Data []struct {
+				Domain string `json:"domain"`
+			} `json:"data"`
+		} `json:"domain"`
 		Port struct {
 			Data []struct {
 				Port        int    `json:"open_port_no"`
@@ -92,8 +105,18 @@ func (p *CriminalIPProvider) HostLookup(ip string) (*OSINTHostResult, error) {
 		} `json:"port"`
 		Vulnerability struct {
 			Data []struct {
-				CVEId      string `json:"cve_id"`
-				Cvssv3Score float64 `json:"cvssv3_score"`
+				CVEId          string  `json:"cve_id"`
+				Cvssv3Score    float64 `json:"cvssv3_score"`
+				CVEDescription string  `json:"cve_description"`
+				ListCWE        []struct {
+					CWEName string `json:"cwe_name"`
+				} `json:"list_cwe"`
+				AppName     string  `json:"app_name"`
+				AppVersion  string  `json:"app_version"`
+				OpenPortNo  []struct {
+					Port   int    `json:"port"`
+					Socket string `json:"socket"`
+				} `json:"open_port_no"`
 			} `json:"data"`
 		} `json:"vulnerability"`
 		Whois struct {
@@ -122,7 +145,24 @@ func (p *CriminalIPProvider) HostLookup(ip string) (*OSINTHostResult, error) {
 	if resp.Score.Inbound != "" {
 		result.Tags = append(result.Tags, fmt.Sprintf("Score Inbound: %s", resp.Score.Inbound))
 	}
+	if resp.Score.Outbound != "" {
+		result.ScoreOutbound = resp.Score.Outbound
+	}
+	result.SearchCount = resp.UserSearchCount
+	
+	if resp.Issues.IsVPN { result.Tags = append(result.Tags, "VPN") }
+	if resp.Issues.IsTor { result.Tags = append(result.Tags, "Tor Node") }
+	if resp.Issues.IsProxy { result.Tags = append(result.Tags, "Proxy") }
+	if resp.Issues.IsCloud { result.Tags = append(result.Tags, "Cloud") }
+	if resp.Issues.IsScanner { result.Tags = append(result.Tags, "Scanner") }
 
+	for _, d := range resp.Domain.Data {
+		if d.Domain != "" {
+			result.Hostnames = append(result.Hostnames, d.Domain)
+		}
+	}
+
+	portMap := make(map[int]bool)
 	for _, portData := range resp.Port.Data {
 		result.Services = append(result.Services, OSINTServicePort{
 			Port:      portData.Port,
@@ -131,6 +171,7 @@ func (p *CriminalIPProvider) HostLookup(ip string) (*OSINTHostResult, error) {
 			Version:   portData.AppVersion,
 			Banner:    portData.Banner,
 		})
+		portMap[portData.Port] = true
 	}
 
 	for _, vuln := range resp.Vulnerability.Data {
@@ -143,10 +184,30 @@ func (p *CriminalIPProvider) HostLookup(ip string) (*OSINTHostResult, error) {
 			severity = "Medium"
 		}
 		
+		cweName := ""
+		if len(vuln.ListCWE) > 0 {
+			cweName = vuln.ListCWE[0].CWEName
+		}
+
 		result.Vulns = append(result.Vulns, OSINTVulnerability{
-			ID:       vuln.CVEId,
-			Severity: severity,
+			ID:          vuln.CVEId,
+			Description: vuln.CVEDescription,
+			Severity:    severity,
+			CWEName:     cweName,
 		})
+
+		// Extrai portas que vieram embutidas nas vulnerabilidades
+		for _, p := range vuln.OpenPortNo {
+			if !portMap[p.Port] {
+				result.Services = append(result.Services, OSINTServicePort{
+					Port:      p.Port,
+					Transport: p.Socket,
+					Product:   vuln.AppName,
+					Version:   vuln.AppVersion,
+				})
+				portMap[p.Port] = true
+			}
+		}
 	}
 
 	return result, nil
