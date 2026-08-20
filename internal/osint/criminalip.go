@@ -76,12 +76,11 @@ func (p *CriminalIPProvider) HostLookup(ip string) (*OSINTHostResult, error) {
 
 	// Estrutura parcial da resposta do Criminal IP
 	var resp struct {
-		IP struct {
-			Score struct {
-				Inbound  string `json:"inbound"`
-				Outbound string `json:"outbound"`
-			} `json:"score"`
-		} `json:"ip"`
+		IP    string `json:"ip"`
+		Score struct {
+			Inbound  string `json:"inbound"`
+			Outbound string `json:"outbound"`
+		} `json:"score"`
 		Port struct {
 			Data []struct {
 				Port        int    `json:"open_port_no"`
@@ -120,7 +119,9 @@ func (p *CriminalIPProvider) HostLookup(ip string) (*OSINTHostResult, error) {
 	}
 
 	// Adiciona score como tag
-	result.Tags = append(result.Tags, fmt.Sprintf("Score Inbound: %s", resp.IP.Score.Inbound))
+	if resp.Score.Inbound != "" {
+		result.Tags = append(result.Tags, fmt.Sprintf("Score Inbound: %s", resp.Score.Inbound))
+	}
 
 	for _, portData := range resp.Port.Data {
 		result.Services = append(result.Services, OSINTServicePort{

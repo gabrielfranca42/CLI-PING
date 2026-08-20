@@ -94,6 +94,12 @@ func (c *CLI) runOSINTHostLookup(scanner *bufio.Scanner) {
 		return
 	}
 
+	// Remove a porta caso o usuário tenha colado algo como "ip:porta"
+	if strings.Contains(input, ":") {
+		parts := strings.Split(input, ":")
+		input = parts[0]
+	}
+
 	fmt.Printf("\n  %s[*] Consultando %s via %s ...%s\n", view.Yellow, input, c.osintService.ActiveProvider().Name(), view.Reset)
 
 	result, err := c.osintService.HostLookup(input)
