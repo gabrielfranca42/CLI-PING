@@ -12,6 +12,7 @@ import (
 
 	"github.com/gabrifranca/cli_ping/internal/domain"
 	"github.com/gabrifranca/cli_ping/internal/fileserver"
+	"github.com/gabrifranca/cli_ping/internal/osint"
 	"github.com/gabrifranca/cli_ping/internal/ping"
 	scannerPkg "github.com/gabrifranca/cli_ping/internal/scanner"
 	"github.com/gabrifranca/cli_ping/internal/sniffer"
@@ -28,6 +29,7 @@ type CLI struct {
 	webPentester domain.WebPentester
 	printer      *view.Printer
 	wifiService  *wifi.WiFiService
+	osintService *osint.OSINTService
 }
 
 // NewCLI é o construtor responsável pela injeção de dependências.
@@ -39,6 +41,7 @@ func NewCLI() *CLI {
 		webPentester: webpentest.NewWebPentestService(),
 		printer:      view.NewPrinter(),
 		wifiService:  wifi.NewWiFiService(),
+		osintService: osint.NewOSINTService(),
 	}
 }
 
@@ -83,6 +86,8 @@ func (c *CLI) RunInteractive() {
 			c.showWebPentestMenu()
 		case "9":
 			c.runDiagnoseMenu(scanner)
+		case "10":
+			c.runOSINTMenu(scanner)
 		case "clear", "cls":
 			fmt.Print("\033[H\033[2J")
 			c.printer.PrintBanner()
@@ -105,6 +110,7 @@ func (c *CLI) printMainMenu() {
   %s[ 7 ]%s SAM Extractor (Dump + Crack NTLM)
   %s[ 8 ]%s Web Pentest (SSR Fuzzer)
   %s[ 9 ]%s Diagnóstico de Rede (Latência + Traceroute)
+  %s[10 ]%s OSINT Recon (CriminalIP/LeakIX)
   %s[ 0 ]%s Sair
   ──────────────────────────────────────────────────
 `
@@ -119,6 +125,7 @@ func (c *CLI) printMainMenu() {
 		view.Red, view.Reset,
 		view.Red, view.Reset,
 		view.Yellow, view.Reset,
+		view.Cyan, view.Reset,
 		view.Red, view.Reset,
 	)
 }
@@ -377,7 +384,7 @@ func (c *CLI) runARPSpoof(scanner *bufio.Scanner) {
 		if i < len(manualMACs) {
 			mac = manualMACs[i]
 		}
-		go snifferSvc.ARPSpoofMitM(ctx, ip, mac, &showLogs, &showTracer, &isBlocked, &rstDropPercent, &isLagged, &isDNSSinkhole, &isICMPUnreachable, &wpadFileInjection, wpadServerAddr)
+		go snifferSvc.ARPSpoofMitM(ctx, ip, mac, &showLogs, &showTracer, &isBlocked, &rstDropPercent, &isLagged, &isDNSSinkhole, &isICMPUnreachable, &wpadFileInjection, &wpadServerAddr)
 	}
 
 	// Aguarda um momento para o ARP Spoof se estabilizar
@@ -1284,7 +1291,7 @@ func (c *CLI) runARPSpoofAll(scanner *bufio.Scanner) {
 
 	for _, t := range targets {
 		targetIPs = append(targetIPs, t.IP)
-		go snifferSvc.ARPSpoofMitM(ctx, t.IP, t.MAC, &showLogs, &showTracer, &isBlocked, &rstDropPercent, &isLagged, &isDNSSinkhole, &isICMPUnreachable, &wpadFileInjection, wpadServerAddr)
+		go snifferSvc.ARPSpoofMitM(ctx, t.IP, t.MAC, &showLogs, &showTracer, &isBlocked, &rstDropPercent, &isLagged, &isDNSSinkhole, &isICMPUnreachable, &wpadFileInjection, &wpadServerAddr)
 	}
 
 	// 7. Aguarda estabilização

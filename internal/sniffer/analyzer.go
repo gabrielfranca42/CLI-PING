@@ -107,7 +107,7 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 	knownDevices := loadKnownDevices()
 	dbUpdated := false
 
-	// Coleta todos os IPs Ãºnicos que temos alguma informaÃ§Ã£o de OS ou trÃ¡fego
+	// Coleta todos os IPs atipicos l que temos alguma informaÃ§Ã£o de OS ou trafego
 	allIPs := make(map[string]bool)
 	for ip := range logs.HostOSByDNS {
 		allIPs[ip] = true
