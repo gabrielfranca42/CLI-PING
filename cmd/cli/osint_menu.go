@@ -12,7 +12,7 @@ import (
 func (c *CLI) runOSINTMenu(scanner *bufio.Scanner) {
 	for {
 		provider := c.osintService.ActiveProvider()
-		
+
 		fmt.Printf("\n  %s%s--- OSINT Recon ---%s\n", view.Bold, view.Cyan, view.Reset)
 		fmt.Printf("  %s[*] Provedor Atual: %s[%s]%s (Pressione 'T' para alternar)%s\n", view.Dim, view.Cyan, provider.Name(), view.Dim, view.Reset)
 
@@ -78,15 +78,21 @@ func (c *CLI) requireOSINTKey() bool {
 }
 
 func (c *CLI) runOSINTHostLookup(scanner *bufio.Scanner) {
-	if !c.requireOSINTKey() { return }
+	if !c.requireOSINTKey() {
+		return
+	}
 
 	fmt.Printf("\n  %s[*] OSINT Host Lookup%s\n", view.Cyan, view.Reset)
 	fmt.Printf("  Digite o IP do alvo (ex: 8.8.8.8) ou 'voltar':\n")
 	fmt.Printf("  %s%sip > %s", view.Bold, view.Cyan, view.Reset)
 
-	if !scanner.Scan() { return }
+	if !scanner.Scan() {
+		return
+	}
 	input := strings.TrimSpace(scanner.Text())
-	if input == "" || input == "voltar" { return }
+	if input == "" || input == "voltar" {
+		return
+	}
 
 	fmt.Printf("\n  %s[*] Consultando %s via %s ...%s\n", view.Yellow, input, c.osintService.ActiveProvider().Name(), view.Reset)
 
@@ -137,15 +143,21 @@ func (c *CLI) printOSINTHostResult(result *osint.OSINTHostResult) {
 }
 
 func (c *CLI) runOSINTSearch(scanner *bufio.Scanner) {
-	if !c.requireOSINTKey() { return }
+	if !c.requireOSINTKey() {
+		return
+	}
 
 	fmt.Printf("\n  %s[*] OSINT Busca Global%s\n", view.Cyan, view.Reset)
 	fmt.Printf("  Digite o termo de busca (ex: Apache, Nginx, admin):\n")
 	fmt.Printf("  %s%squery > %s", view.Bold, view.Cyan, view.Reset)
 
-	if !scanner.Scan() { return }
+	if !scanner.Scan() {
+		return
+	}
 	input := strings.TrimSpace(scanner.Text())
-	if input == "" || input == "voltar" { return }
+	if input == "" || input == "voltar" {
+		return
+	}
 
 	fmt.Printf("\n  %s[*] Buscando por '%s' via %s ...%s\n", view.Yellow, input, c.osintService.ActiveProvider().Name(), view.Reset)
 	result, err := c.osintService.Search(input, 1)
@@ -156,7 +168,26 @@ func (c *CLI) runOSINTSearch(scanner *bufio.Scanner) {
 
 	fmt.Printf("\n  %s%s── Resultados Encontrados: %d ──%s\n", view.Bold, view.Cyan, result.Total, view.Reset)
 	for i, m := range result.Matches {
-		fmt.Printf("  %s[%d] %s%s%s:%d %s(%s)%s\n", view.Yellow, i+1, view.Bold, m.IP, view.Reset, m.Port, view.Dim, m.Product, view.Reset)
+		info := m.Product
+		if info == "" {
+			info = "Desconhecido"
+		}
+		country := m.Country
+		if country == "" {
+			country = "N/A"
+		}
+
+		fmt.Printf("  %s[%d] %s%s%s:%d\n", view.Yellow, i+1, view.Bold, m.IP, view.Reset, m.Port)
+		fmt.Printf("      %sProduto:%s %s | %sPaís:%s %s\n", view.Cyan, view.Reset, info, view.Cyan, view.Reset, country)
+
+		if m.Banner != "" {
+			banner := strings.TrimSpace(m.Banner)
+			if len(banner) > 80 {
+				banner = banner[:77] + "..."
+			}
+			banner = strings.ReplaceAll(banner, "\n", " ")
+			fmt.Printf("      %sBanner:%s  %s%s%s\n", view.Cyan, view.Reset, view.Dim, banner, view.Reset)
+		}
 	}
 	fmt.Println()
 }
@@ -166,9 +197,13 @@ func (c *CLI) runOSINTReverseDNS(scanner *bufio.Scanner) {
 	fmt.Printf("  Digite os IPs separados por espaço:\n")
 	fmt.Printf("  %s%sips > %s", view.Bold, view.Cyan, view.Reset)
 
-	if !scanner.Scan() { return }
+	if !scanner.Scan() {
+		return
+	}
 	input := strings.TrimSpace(scanner.Text())
-	if input == "" || input == "voltar" { return }
+	if input == "" || input == "voltar" {
+		return
+	}
 
 	ips := strings.Fields(input)
 	fmt.Printf("\n  %s[*] Consultando %d IP(s)...%s\n", view.Yellow, len(ips), view.Reset)
@@ -190,9 +225,13 @@ func (c *CLI) runOSINTConfigKey(scanner *bufio.Scanner) {
 	fmt.Printf("  Cole a API Key (ou 'voltar'):\n")
 	fmt.Printf("  %s%skey > %s", view.Bold, view.Cyan, view.Reset)
 
-	if !scanner.Scan() { return }
+	if !scanner.Scan() {
+		return
+	}
 	input := strings.TrimSpace(scanner.Text())
-	if input == "" || input == "voltar" { return }
+	if input == "" || input == "voltar" {
+		return
+	}
 
 	p.SetAPIKey(input)
 	err := c.osintService.SaveAPIKey(p.Name(), input)
