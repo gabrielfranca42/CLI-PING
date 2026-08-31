@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"runtime"
 	"time"
 
 	"github.com/gabrifranca/cli_ping/internal/report"
@@ -24,23 +25,27 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 	var mu sync.Mutex
 
 	for ip := range logs.DiscoveredHosts {
+		key := ip
+		if runtime.GOOS == "linux" {
+			key = logs.DiscoveredHosts[ip]
+		}
 		// NetBIOS é tipicamente IPv4, ignoramos IPv6 para otimizar
 		if ip != "" && !strings.Contains(ip, ":") {
 			wg.Add(1)
-			go func(targetIP string) {
+			go func(targetIP, hostKey string) {
 				defer wg.Done()
 				nbnsResult, err := extraService.NBNSLookup(targetIP)
 				if err == nil && nbnsResult != nil {
 					mu.Lock()
 					if nbnsResult.Hostname != "" {
-						logs.HostNames[targetIP] = nbnsResult.Hostname
+						logs.HostNames[hostKey] = nbnsResult.Hostname
 					}
 					if nbnsResult.Username != "" {
-						logs.HostUsers[targetIP] = nbnsResult.Username
+						logs.HostUsers[hostKey] = nbnsResult.Username
 					}
 					mu.Unlock()
 				}
-			}(ip)
+			}(ip, key)
 		}
 	}
 	wg.Wait()
@@ -122,7 +127,13 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 		allIPs[ip] = true
 	}
 	for ip := range logs.DiscoveredHosts {
-		allIPs[ip] = true
+		key := ip
+		if runtime.GOOS == "linux" {
+			key = logs.DiscoveredHosts[ip]
+		}
+		if key != "" {
+			allIPs[key] = true
+		}
 	}
 
 	// Inicializa o StringBuilder para o log_https.txt
@@ -133,7 +144,11 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 	httpsSB.WriteString(fmt.Sprintf("  Gerado em: %s\n\n", time.Now().Format("02/01/2006 15:04:05")))
 
 	if len(allIPs) > 0 {
-		for ip := range allIPs {
+		for key := range allIPs {
+			ip := key
+			if lastIP, ok := logs.HostLastIP[key]; ok && lastIP != "" {
+				ip = lastIP
+			}
 			var osDNS, osTTL string
 			var ttlVal uint8
 
@@ -177,6 +192,9 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 
 			// Recupera o MAC
 			mac := logs.DiscoveredHosts[ip]
+			if runtime.GOOS == "linux" && len(key) == 17 && strings.Contains(key, ":") {
+				mac = key
+			}
 
 			// EstratÃ©gia 4: HeurÃ­stica de MAC (Aplicada se for Indeterminado ou TTL genÃ©rico)
 			if mac != "" && (veredito == "Indeterminado" || veredito == "Linux/Android/iOS/macOS (TTL base 64)") {
@@ -209,10 +227,10 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 				if !strings.Contains(metodo, "BD") && veredito != "Indeterminado" {
 					if metodo == "DNS Captive Portal" || metodo == "DNS / mDNS Payload" || metodo == "DHCP Fingerprint" || (metodo == "TTL Fingerprint" && ttlVal > 30) {
 						knownDev := knownDevices[mac]
-						if knownDev.OS != veredito || knownDev.LastIP != ip || knownDev.Hostname != logs.HostNames[ip] {
+						if knownDev.OS != veredito || knownDev.LastIP != ip || knownDev.Hostname != logs.HostNames[key] {
 							knownDev.OS = veredito
 							knownDev.LastIP = ip
-							if name, ok := logs.HostNames[ip]; ok && name != "" {
+							if name, ok := logs.HostNames[key]; ok && name != "" {
 								knownDev.Hostname = name
 							}
 							knownDevices[mac] = knownDev
@@ -234,11 +252,11 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 
 			httpsSB.WriteString("-------------------------------------------------------------------------\n")
 			hostnameLabel := ""
-			if name, ok := logs.HostNames[ip]; ok && name != "" {
+			if name, ok := logs.HostNames[key]; ok && name != "" {
 				hostnameLabel = fmt.Sprintf(" (%s)", name)
 			}
 			userLabel := ""
-			if user, ok := logs.HostUsers[ip]; ok && user != "" {
+			if user, ok := logs.HostUsers[key]; ok && user != "" {
 				userLabel = fmt.Sprintf(" | Usuário: %s", user)
 			}
 			httpsSB.WriteString(fmt.Sprintf("MÃ QUINA: %s%s%s\n", ip, hostnameLabel, userLabel))
@@ -364,8 +382,13 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 			continue
 		}
 		
-		name := logs.HostNames[ip]
-		user := logs.HostUsers[ip]
+		key := ip
+		if runtime.GOOS == "linux" && mac != "" {
+			key = mac
+		}
+
+		name := logs.HostNames[key]
+		user := logs.HostUsers[key]
 		
 		// SÃ³ inclui no log se tiver alguma informaÃ§Ã£o Ãºtil de mÃ¡quina alÃ©m do IP/MAC
 		if name != "" || user != "" {
