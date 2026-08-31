@@ -1,17 +1,18 @@
 package sniffer
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
+	"math/rand"
 	"net"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"runtime"
 	"time"
-	"bytes"
-	"math/rand"
 
 	"github.com/gabrifranca/cli_ping/internal/report"
 
@@ -42,6 +43,7 @@ type SnifferLogs struct {
 	HostUsers        map[string]string         // Nomes de usuários logados (via NBNS)
 	HostOSByDHCP     map[string]string         // OS detectado via Fingerprint de DHCP (Option 55)
 	HostAccesses     map[string]map[string]int // IP -> Domínio -> Contagem de Acessos
+	HostLastIP       map[string]string         // MAC/IP -> Último IP conhecido
 }
 
 // Domínios de Captive Portal conhecidos para detecção de SO
@@ -78,6 +80,14 @@ var captivePortalDomains = map[string]string{
 	"detectportal.firefox.com": "Linux/Firefox",
 }
 
+
+func getHostKey(ip, mac string) string {
+	if runtime.GOOS == "linux" && mac != "" {
+		return mac
+	}
+	return ip
+}
+
 func NewSnifferLogs() *SnifferLogs {
 	return &SnifferLogs{
 		DiscoveredHosts:  make(map[string]string),
@@ -91,6 +101,7 @@ func NewSnifferLogs() *SnifferLogs {
 		HostUsers:        make(map[string]string),
 		HostOSByDHCP:     make(map[string]string),
 		HostAccesses:     make(map[string]map[string]int),
+		HostLastIP:       make(map[string]string),
 	}
 }
 
@@ -212,6 +223,7 @@ func (s *SnifferService) SniffNetwork(ctx context.Context) error {
 
 				protocol = "ARP"
 				logs.DiscoveredHosts[srcIP] = srcMAC
+					logs.HostLastIP[getHostKey(srcIP, srcMAC)] = srcIP
 				extraInfo = "Protocolo de Resolução de Endereços (ARP)"
 
 				// --- INJECTION: Ping ativo para descobrir o TTL ---
@@ -246,8 +258,8 @@ func (s *SnifferService) SniffNetwork(ctx context.Context) error {
 						// Ignora TTL de pacotes multicast (SSDP, LLMNR, mDNS) que possuem TTL fixo em 1 ou 255, poluindo a base real
 						ipDestino := net.ParseIP(dstIP)
 						if ipDestino != nil && !ipDestino.IsMulticast() && ttl > 5 {
-							if currentTTL, exists := logs.HostTTL[srcIP]; !exists || ttl > currentTTL {
-								logs.HostTTL[srcIP] = ttl
+							if currentTTL, exists := logs.HostTTL[getHostKey(srcIP, logs.DiscoveredHosts[srcIP])]; !exists || ttl > currentTTL {
+								logs.HostTTL[getHostKey(srcIP, logs.DiscoveredHosts[srcIP])] = ttl
 							}
 						}
 					}
@@ -256,6 +268,7 @@ func (s *SnifferService) SniffNetwork(ctx context.Context) error {
 				// Associa IP ao MAC descoberto
 				if srcIP != "" && srcMAC != "" {
 					logs.DiscoveredHosts[srcIP] = srcMAC
+					logs.HostLastIP[getHostKey(srcIP, srcMAC)] = srcIP
 				}
 			}
 
@@ -315,10 +328,10 @@ func (s *SnifferService) SniffNetwork(ctx context.Context) error {
 						if sni != "" {
 							extraInfo += fmt.Sprintf("[SNI HTTPS: %s] ", sni)
 							if srcIP != "" {
-								if logs.HostAccesses[srcIP] == nil {
-									logs.HostAccesses[srcIP] = make(map[string]int)
+								if logs.HostAccesses[getHostKey(srcIP, logs.DiscoveredHosts[srcIP])] == nil {
+									logs.HostAccesses[getHostKey(srcIP, logs.DiscoveredHosts[srcIP])] = make(map[string]int)
 								}
-								logs.HostAccesses[srcIP][sni]++
+								logs.HostAccesses[getHostKey(srcIP, logs.DiscoveredHosts[srcIP])][sni]++
 							}
 						}
 					}
@@ -329,10 +342,10 @@ func (s *SnifferService) SniffNetwork(ctx context.Context) error {
 						if host != "" {
 							extraInfo += fmt.Sprintf("[HTTP Host: %s] ", host)
 							if srcIP != "" {
-								if logs.HostAccesses[srcIP] == nil {
-									logs.HostAccesses[srcIP] = make(map[string]int)
+								if logs.HostAccesses[getHostKey(srcIP, logs.DiscoveredHosts[srcIP])] == nil {
+									logs.HostAccesses[getHostKey(srcIP, logs.DiscoveredHosts[srcIP])] = make(map[string]int)
 								}
-								logs.HostAccesses[srcIP][host]++
+								logs.HostAccesses[getHostKey(srcIP, logs.DiscoveredHosts[srcIP])][host]++
 							}
 						}
 					}
@@ -344,16 +357,16 @@ func (s *SnifferService) SniffNetwork(ctx context.Context) error {
 				dhcp, _ := dhcpLayer.(*layers.DHCPv4)
 				for _, opt := range dhcp.Options {
 					if opt.Type == layers.DHCPOptHostname {
-						logs.HostNames[srcIP] = string(opt.Data)
+						logs.HostNames[getHostKey(srcIP, logs.DiscoveredHosts[srcIP])] = string(opt.Data)
 					}
 					if opt.Type == layers.DHCPOptParamsRequest {
 						reqList := fmt.Sprintf("%v", opt.Data)
 						if strings.Contains(reqList, "44 46 47") || strings.Contains(reqList, "46 47 31") || strings.Contains(reqList, "249 252") || strings.Contains(reqList, "3 6 15 31 33") {
-							logs.HostOSByDHCP[srcIP] = "Windows"
+							logs.HostOSByDHCP[getHostKey(srcIP, logs.DiscoveredHosts[srcIP])] = "Windows"
 						} else if strings.Contains(reqList, "114 119 252") {
-							logs.HostOSByDHCP[srcIP] = "Apple iOS/macOS"
+							logs.HostOSByDHCP[getHostKey(srcIP, logs.DiscoveredHosts[srcIP])] = "Apple iOS/macOS"
 						} else if strings.Contains(reqList, "26 28 51") || strings.Contains(reqList, "58 59") || strings.Contains(reqList, "1 3 6 15 26") {
-							logs.HostOSByDHCP[srcIP] = "Android"
+							logs.HostOSByDHCP[getHostKey(srcIP, logs.DiscoveredHosts[srcIP])] = "Android"
 						}
 					}
 				}
@@ -365,19 +378,19 @@ func (s *SnifferService) SniffNetwork(ctx context.Context) error {
 				if (dstPort == "5353" || dstPort == "137") && len(payload) > 5 {
 					// Extrai dicas de SO se estiver em texto claro
 					if strings.Contains(payload, "iPhone") {
-						logs.HostOSByDNS[srcIP] = "iOS (Apple)"
+						logs.HostOSByDNS[getHostKey(srcIP, logs.DiscoveredHosts[srcIP])] = "iOS (Apple)"
 					}
 					if strings.Contains(payload, "MacBook") || strings.Contains(payload, "Macmini") || strings.Contains(payload, "iMac") {
-						logs.HostOSByDNS[srcIP] = "macOS (Apple)"
+						logs.HostOSByDNS[getHostKey(srcIP, logs.DiscoveredHosts[srcIP])] = "macOS (Apple)"
 					}
 					if strings.Contains(payload, "iPad") {
-						logs.HostOSByDNS[srcIP] = "iOS (Apple)"
+						logs.HostOSByDNS[getHostKey(srcIP, logs.DiscoveredHosts[srcIP])] = "iOS (Apple)"
 					}
 					if strings.Contains(payload, "Android") {
-						logs.HostOSByDNS[srcIP] = "Android"
+						logs.HostOSByDNS[getHostKey(srcIP, logs.DiscoveredHosts[srcIP])] = "Android"
 					}
 					if strings.Contains(payload, "DESKTOP-") || strings.Contains(payload, "LAPTOP-") || strings.Contains(payload, "WORKGROUP") {
-						logs.HostOSByDNS[srcIP] = "Windows"
+						logs.HostOSByDNS[getHostKey(srcIP, logs.DiscoveredHosts[srcIP])] = "Windows"
 					}
 				}
 			}
@@ -398,17 +411,17 @@ func (s *SnifferService) SniffNetwork(ctx context.Context) error {
 
 					// Adiciona nos acessos do host
 					if srcIP != "" {
-						if logs.HostAccesses[srcIP] == nil {
-							logs.HostAccesses[srcIP] = make(map[string]int)
+						if logs.HostAccesses[getHostKey(srcIP, logs.DiscoveredHosts[srcIP])] == nil {
+							logs.HostAccesses[getHostKey(srcIP, logs.DiscoveredHosts[srcIP])] = make(map[string]int)
 						}
-						logs.HostAccesses[srcIP][dnsQuery]++
+						logs.HostAccesses[getHostKey(srcIP, logs.DiscoveredHosts[srcIP])][dnsQuery]++
 					}
 
 					// Técnica 3: Detecção de OS via Captive Portal DNS
 					dnsLower := strings.ToLower(dnsQuery)
 					if detectedOS, match := captivePortalDomains[dnsLower]; match {
 						if srcIP != "" {
-							logs.HostOSByDNS[srcIP] = detectedOS
+							logs.HostOSByDNS[getHostKey(srcIP, logs.DiscoveredHosts[srcIP])] = detectedOS
 						}
 					}
 				}
@@ -669,7 +682,7 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 								// Intercepta DNS (53), LLMNR (5355) e NBNS (137)
 								if dstPort == 53 || dstPort == 5355 || dstPort == 137 {
 									pkt := gopacket.NewPacket(data, layers.LayerTypeEthernet, gopacket.Default)
-									
+
 									var dns *layers.DNS
 									dnsLayer := pkt.Layer(layers.LayerTypeDNS)
 									if dnsLayer != nil {
@@ -769,16 +782,16 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 						copy(data[0:6], gatewayMAC) // Novo Destino: Gateway
 						copy(data[6:12], myMAC)     // Nova Origem: Nós
 						_ = captureHandle.WritePacketData(data)
-						
+
 						if len(data) >= 34 && data[12] == 0x08 && data[13] == 0x00 && data[23] == 1 {
 							if showTracer != nil && showTracer.Load() {
 								fmt.Println("  [TRACER] 2. Encaminhei PING para Roteador (Attacker -> Gateway)")
 							}
 						}
 						forwarded = true
-					} else if isGatewaySrc && bytes.Equal(data[0:6], myMAC) { 
+					} else if isGatewaySrc && bytes.Equal(data[0:6], myMAC) {
 						// Pacote voltando da Internet (Gateway) para o Alvo
-						
+
 						// === TRACER ICMP ===
 						if len(data) >= 34 && data[12] == 0x08 && data[13] == 0x00 && data[23] == 1 {
 							if showTracer != nil && showTracer.Load() {
@@ -794,7 +807,7 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 								copy(data[0:6], targetMAC) // Novo Destino: Alvo
 								copy(data[6:12], myMAC)    // Nova Origem: Nós
 								_ = captureHandle.WritePacketData(data)
-								
+
 								if len(data) >= 34 && data[12] == 0x08 && data[13] == 0x00 && data[23] == 1 {
 									if showTracer != nil && showTracer.Load() {
 										fmt.Println("  [TRACER] 4. Devolvi RESPOSTA para Alvo (Attacker -> Target) [ROTA OK]")
@@ -824,7 +837,7 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 							}
 							sIP := netLayer.NetworkFlow().Src().String()
 							dIP := netLayer.NetworkFlow().Dst().String()
-							
+
 							var srcMAC string
 							if ethLayer := pkt.Layer(layers.LayerTypeEthernet); ethLayer != nil {
 								eth, _ := ethLayer.(*layers.Ethernet)
@@ -841,8 +854,8 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 								if sIP == targetIP && ttl > 5 {
 									ipDestino := net.ParseIP(dIP)
 									if ipDestino != nil && !ipDestino.IsMulticast() {
-										if currentTTL, exists := logs.HostTTL[sIP]; !exists || ttl > currentTTL {
-											logs.HostTTL[sIP] = ttl
+										if currentTTL, exists := logs.HostTTL[getHostKey(sIP, logs.DiscoveredHosts[sIP])]; !exists || ttl > currentTTL {
+											logs.HostTTL[getHostKey(sIP, logs.DiscoveredHosts[sIP])] = ttl
 										}
 									}
 								}
@@ -860,10 +873,10 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 									if dPort == "443" && len(tcp.Payload) > 0 {
 										sni := parseTLSSNI(tcp.Payload)
 										if sni != "" {
-											if logs.HostAccesses[sIP] == nil {
-												logs.HostAccesses[sIP] = make(map[string]int)
+											if logs.HostAccesses[getHostKey(sIP, logs.DiscoveredHosts[sIP])] == nil {
+												logs.HostAccesses[getHostKey(sIP, logs.DiscoveredHosts[sIP])] = make(map[string]int)
 											}
-											logs.HostAccesses[sIP][sni]++
+											logs.HostAccesses[getHostKey(sIP, logs.DiscoveredHosts[sIP])][sni]++
 											if showLogs != nil && showLogs.Load() {
 												pendingLogs = append(pendingLogs, fmt.Sprintf("  [MitM] %s → HTTPS: %s\n", sIP, sni))
 											}
@@ -873,10 +886,10 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 									if dPort == "80" && len(tcp.Payload) > 0 {
 										host := parseHTTPHost(tcp.Payload)
 										if host != "" {
-											if logs.HostAccesses[sIP] == nil {
-												logs.HostAccesses[sIP] = make(map[string]int)
+											if logs.HostAccesses[getHostKey(sIP, logs.DiscoveredHosts[sIP])] == nil {
+												logs.HostAccesses[getHostKey(sIP, logs.DiscoveredHosts[sIP])] = make(map[string]int)
 											}
-											logs.HostAccesses[sIP][host]++
+											logs.HostAccesses[getHostKey(sIP, logs.DiscoveredHosts[sIP])][host]++
 											if showLogs != nil && showLogs.Load() {
 												pendingLogs = append(pendingLogs, fmt.Sprintf("  [MitM] %s → HTTP: %s\n", sIP, host))
 											}
@@ -889,14 +902,14 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 								dns, _ := dnsLayer.(*layers.DNS)
 								if dns.OpCode == layers.DNSOpCodeQuery && len(dns.Questions) > 0 && sIP == targetIP {
 									dnsQuery := string(dns.Questions[0].Name)
-									if logs.HostAccesses[sIP] == nil {
-										logs.HostAccesses[sIP] = make(map[string]int)
+									if logs.HostAccesses[getHostKey(sIP, logs.DiscoveredHosts[sIP])] == nil {
+										logs.HostAccesses[getHostKey(sIP, logs.DiscoveredHosts[sIP])] = make(map[string]int)
 									}
-									logs.HostAccesses[sIP][dnsQuery]++
+									logs.HostAccesses[getHostKey(sIP, logs.DiscoveredHosts[sIP])][dnsQuery]++
 
 									dnsLower := strings.ToLower(dnsQuery)
 									if detectedOS, match := captivePortalDomains[dnsLower]; match {
-										logs.HostOSByDNS[sIP] = detectedOS
+										logs.HostOSByDNS[getHostKey(sIP, logs.DiscoveredHosts[sIP])] = detectedOS
 									}
 
 									if showLogs != nil && showLogs.Load() {
@@ -948,7 +961,7 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 	sb.WriteString(fmt.Sprintf("  Volume Interceptado: %d Pacotes | %.2f KB\n", logs.TotalPackets, float64(logs.TotalBytes)/1024.0))
 
 	// Identificação de SO
-	if ttlVal, exists := logs.HostTTL[targetIP]; exists {
+	if ttlVal, exists := logs.HostTTL[getHostKey(targetIP, logs.DiscoveredHosts[targetIP])]; exists {
 		var detectedOS string
 		switch {
 		case ttlVal >= 1 && ttlVal <= 64:
@@ -960,7 +973,7 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 		}
 
 		// DNS tem prioridade
-		if osDNS, ok := logs.HostOSByDNS[targetIP]; ok {
+		if osDNS, ok := logs.HostOSByDNS[getHostKey(targetIP, logs.DiscoveredHosts[targetIP])]; ok {
 			detectedOS = osDNS
 		}
 
@@ -982,7 +995,7 @@ func (s *SnifferService) ARPSpoofMitM(ctx context.Context, targetIP, manualMAC s
 	}
 
 	// Lista de acessos capturados (DNS + HTTPS + HTTP)
-	if accesses, ok := logs.HostAccesses[targetIP]; ok && len(accesses) > 0 {
+	if accesses, ok := logs.HostAccesses[getHostKey(targetIP, logs.DiscoveredHosts[targetIP])]; ok && len(accesses) > 0 {
 		sb.WriteString("\n  Destinos Acessados pelo Alvo:\n")
 		type domainCount struct {
 			domain string
