@@ -2,10 +2,11 @@ package sniffer
 
 import (
 	"fmt"
+	"net"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
-	"runtime"
 	"time"
 
 	"github.com/gabrifranca/cli_ping/internal/report"
@@ -20,9 +21,12 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 	// Fase de Enumeração Ativa: Para cada IP descoberto que não foi ignorado, fazer lookup NBNS
 	fmt.Println("\n  [*] Iniciando Enumeração Ativa (NBNS) nos hosts descobertos para extrair Usuários e Hostnames...")
 	extraService := scanner.NewExtraService()
-	
+
 	var wg sync.WaitGroup
 	var mu sync.Mutex
+	
+	// Semáforo para evitar congestionamento de UDP e perda de pacotes no switch/roteador
+	sem := make(chan struct{}, 10)
 
 	for ip := range logs.DiscoveredHosts {
 		key := ip
@@ -32,8 +36,12 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 		// NetBIOS é tipicamente IPv4, ignoramos IPv6 para otimizar
 		if ip != "" && !strings.Contains(ip, ":") {
 			wg.Add(1)
+			sem <- struct{}{} // Adquire token (limita concorrência para não perder pacotes UDP)
 			go func(targetIP, hostKey string) {
 				defer wg.Done()
+				defer func() { <-sem }() // Libera token
+				
+				// 1. NBNS Lookup (Tenta extrair Nome Windows/Usuário)
 				nbnsResult, err := extraService.NBNSLookup(targetIP)
 				if err == nil && nbnsResult != nil {
 					mu.Lock()
@@ -42,6 +50,17 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 					}
 					if nbnsResult.Username != "" {
 						logs.HostUsers[hostKey] = nbnsResult.Username
+					}
+					mu.Unlock()
+				}
+
+				// 2. Reverse DNS Lookup (DNS Local / Roteador) para complementar
+				names, errDNS := net.LookupAddr(targetIP)
+				if errDNS == nil && len(names) > 0 {
+					cleanName := strings.TrimSuffix(names[0], ".")
+					mu.Lock()
+					if logs.HostNames[hostKey] == "" { // Só sobrescreve se NBNS não achou nada
+						logs.HostNames[hostKey] = cleanName
 					}
 					mu.Unlock()
 				}
@@ -213,7 +232,7 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 				}
 			}
 
-			// LÃ³gica de PersistÃªncia (Banco de Dados JSON)
+
 			if mac != "" {
 				if knownDev, exists := knownDevices[mac]; exists {
 					// Se jÃ¡ conhecÃ­amos esse MAC, e a nova detecÃ§Ã£o Ã© "Indeterminado" ou possivelmente falha (TTL baixo indicando Linux)
@@ -370,49 +389,126 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 
 	reportContent := sb.String()
 
-	// CriaÃ§Ã£o do log_maquina.txt
+	// Criação do log_maquina.txt — Lista TODOS os dispositivos descobertos
 	var maquinaSB strings.Builder
 	maquinaSB.WriteString("=========================================================================\n")
 	maquinaSB.WriteString("                         AJIN - RELATORIO DE MAQUINAS                    \n")
-	maquinaSB.WriteString("=========================================================================\n\n")
+	maquinaSB.WriteString("=========================================================================\n")
+	maquinaSB.WriteString(fmt.Sprintf("  Gerado em: %s\n\n", time.Now().Format("02/01/2006 15:04:05")))
 
-	hasMachines := false
+	machineCount := 0
 	for ip, mac := range logs.DiscoveredHosts {
-		if ip == "" {
-			continue
+		if ip == "" || strings.Contains(ip, ":") {
+			continue // Ignora entradas vazias e IPv6
 		}
-		
+
 		key := ip
 		if runtime.GOOS == "linux" && mac != "" {
 			key = mac
 		}
 
-		name := logs.HostNames[key]
-		user := logs.HostUsers[key]
-		
-		// SÃ³ inclui no log se tiver alguma informaÃ§Ã£o Ãºtil de mÃ¡quina alÃ©m do IP/MAC
-		if name != "" || user != "" {
-			hasMachines = true
-			maquinaSB.WriteString(fmt.Sprintf("MAQUINA: %s\n", ip))
-			if mac != "" {
-				vendor := manuf.Search(mac)
-				if vendor == "" {
-					vendor = "Desconhecido"
-				}
-				maquinaSB.WriteString(fmt.Sprintf("  - MAC:            %s (%s)\n", mac, vendor))
+		// Detecta SO — IMPORTANTE: usa `key` (= MAC no Linux) que é a mesma chave usada para armazenar os dados
+		osDetected := "Desconhecido"
+		metodoDetected := "Não determinado"
+		var ttlVal uint8
+
+		if os, exists := logs.HostOSByDHCP[key]; exists && os != "" {
+			osDetected = os
+			metodoDetected = "DHCP Fingerprint"
+		} else if os, exists := logs.HostOSByDNS[key]; exists && os != "" {
+			osDetected = os
+			metodoDetected = "DNS / mDNS Payload"
+		} else if t, exists := logs.HostTTL[key]; exists {
+			ttlVal = t
+			switch {
+			case t >= 1 && t <= 64:
+				osDetected = "Linux/Android/iOS/macOS (TTL base 64)"
+				metodoDetected = "TTL Fingerprint"
+			case t >= 65 && t <= 128:
+				osDetected = "Windows (TTL base 128)"
+				metodoDetected = "TTL Fingerprint"
+			case t >= 129 && t <= 255:
+				osDetected = "Roteador/Switch/Equipamento de Rede (TTL base 255)"
+				metodoDetected = "TTL Fingerprint"
 			}
-			if name != "" {
-				maquinaSB.WriteString(fmt.Sprintf("  - Hostname:       %s\n", name))
-			}
-			if user != "" {
-				maquinaSB.WriteString(fmt.Sprintf("  - Usuario Logado: %s\n", user))
-			}
-			maquinaSB.WriteString("-------------------------------------------------------------------------\n")
 		}
+
+		// Heurística de MAC para refinar (completa: inclui todos os fabricantes relevantes)
+		if mac != "" && (osDetected == "Desconhecido" || osDetected == "Linux/Android/iOS/macOS (TTL base 64)") {
+			vendor := strings.ToLower(manuf.Search(mac))
+			if strings.Contains(vendor, "apple") {
+				osDetected = "Apple iOS/macOS"
+				metodoDetected = "Fabricante MAC + Heurística"
+			} else if strings.Contains(vendor, "samsung") || strings.Contains(vendor, "motorola") || strings.Contains(vendor, "xiaomi") || strings.Contains(vendor, "huawei") || strings.Contains(vendor, "oppo") || strings.Contains(vendor, "realme") {
+				osDetected = "Android"
+				metodoDetected = "Fabricante MAC + Heurística"
+			} else if strings.Contains(vendor, "intel") || strings.Contains(vendor, "dell") || strings.Contains(vendor, "hp") || strings.Contains(vendor, "lenovo") || strings.Contains(vendor, "intelbras") {
+				if ttlVal >= 65 && ttlVal <= 128 || ttlVal == 0 { // Assume Windows por padrão se não tivermos capturado IP (TTL=0)
+					osDetected = "Windows PC"
+				} else {
+					osDetected = "Windows/Linux PC"
+				}
+				metodoDetected = "Fabricante MAC + Heurística"
+			} else if strings.Contains(vendor, "ruckus") || strings.Contains(vendor, "ubiquiti") || strings.Contains(vendor, "routerboard") || strings.Contains(vendor, "mikrotik") || strings.Contains(vendor, "cisco") || strings.Contains(vendor, "tp-link") || strings.Contains(vendor, "aruba") {
+				osDetected = "Equipamento de Rede (AP/Switch/Router)"
+				metodoDetected = "Fabricante MAC + Heurística"
+			} else if strings.Contains(vendor, "hikvision") || strings.Contains(vendor, "dahua") {
+				osDetected = "Câmera IP / DVR"
+				metodoDetected = "Fabricante MAC + Heurística"
+			} else if strings.Contains(vendor, "canon") || strings.Contains(vendor, "kyocera") || strings.Contains(vendor, "epson") || strings.Contains(vendor, "brother") {
+				osDetected = "Impressora de Rede"
+				metodoDetected = "Fabricante MAC + Heurística"
+			} else if strings.Contains(vendor, "fanvil") || strings.Contains(vendor, "grandstream") || strings.Contains(vendor, "polycom") || strings.Contains(vendor, "yealink") {
+				osDetected = "Telefone VoIP"
+				metodoDetected = "Fabricante MAC + Heurística"
+			} else if strings.Contains(vendor, "azurewave") || strings.Contains(vendor, "gaoshengda") || strings.Contains(vendor, "cloud network") {
+				if ttlVal >= 65 && ttlVal <= 128 {
+					osDetected = "Windows PC"
+				} else if ttlVal >= 1 && ttlVal <= 64 {
+					osDetected = "Linux/Android (Módulo Wi-Fi genérico)"
+				} else {
+					osDetected = "Dispositivo com Wi-Fi (Módulo genérico)"
+				}
+				metodoDetected = "Fabricante MAC + Heurística"
+			}
+		}
+
+		// Persistência (BD)
+		if mac != "" {
+			if knownDev, exists := knownDevices[mac]; exists {
+				if osDetected == "Desconhecido" || strings.Contains(osDetected, "Linux/Android") {
+					osDetected = knownDev.OS
+					metodoDetected = "Persistência Local (BD)"
+				}
+			}
+		}
+
+		machineCount++
+		vendor := manuf.Search(mac)
+		if vendor == "" {
+			vendor = "Desconhecido"
+		}
+
+		maquinaSB.WriteString(fmt.Sprintf("MAQUINA #%d: %s\n", machineCount, ip))
+		if mac != "" {
+			maquinaSB.WriteString(fmt.Sprintf("  - MAC:               %s (%s)\n", mac, vendor))
+		}
+		maquinaSB.WriteString(fmt.Sprintf("  - Sistema Operacional: %s\n", osDetected))
+		maquinaSB.WriteString(fmt.Sprintf("  - Metodo Deteccao:   %s\n", metodoDetected))
+
+		if name, ok := logs.HostNames[key]; ok && name != "" {
+			maquinaSB.WriteString(fmt.Sprintf("  - Hostname:          %s\n", name))
+		}
+		if user, ok := logs.HostUsers[key]; ok && user != "" {
+			maquinaSB.WriteString(fmt.Sprintf("  - Usuario Logado:    %s\n", user))
+		}
+		maquinaSB.WriteString("-------------------------------------------------------------------------\n")
 	}
-	
-	if !hasMachines { 
-		maquinaSB.WriteString("Nenhuma informacao de Hostname ou Usuario foi encontrada nesta sessao.\n")
+
+	if machineCount == 0 {
+		maquinaSB.WriteString("Nenhum dispositivo IPv4 foi descoberto nesta sessao.\n")
+	} else {
+		maquinaSB.WriteString(fmt.Sprintf("\n  Total: %d dispositivo(s) mapeado(s).\n", machineCount))
 	}
 
 	// 1. Imprime no console para o usuÃ¡rio ver
@@ -426,7 +522,7 @@ func (s *SnifferService) analyzeLogs(logs *SnifferLogs) {
 
 	httpsFilename := "log_https.txt"
 	_ = reporter.SaveReport(httpsFilename, httpsSB.String())
-	
+
 	maquinaFilename := "log_maquina.txt"
 	_ = reporter.SaveReport(maquinaFilename, maquinaSB.String())
 }
