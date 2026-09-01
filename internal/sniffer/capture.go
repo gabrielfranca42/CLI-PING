@@ -162,6 +162,9 @@ func (s *SnifferService) SniffNetwork(ctx context.Context) error {
 	if myMAC != nil && cidr != "" {
 		fmt.Printf("  [*] Iniciando Varredura ARP Ativa em %s (Background)...\n", cidr)
 		go s.ActiveARPSweep(deviceName, myMAC, net.ParseIP(deviceIP), cidr)
+		
+		fmt.Printf("  [*] Acordando dispositivos silenciosos (mDNS Broadcast)...\n")
+		go s.SendMDNSDiscovery(handle, myMAC, net.ParseIP(deviceIP))
 	}
 
 	// Calcula o IP de broadcast da sub-rede dinamicamente
