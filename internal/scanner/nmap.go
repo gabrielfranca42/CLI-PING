@@ -1,7 +1,10 @@
 package scanner
 
 import (
+	"bytes"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
 	"regexp"
 	"runtime"
@@ -64,14 +67,19 @@ func NmapDeepScan(ip string) (string, error) {
 		return "", fmt.Errorf("nmap só suportado no linux")
 	}
 
-	// Escaneamos todas as portas (-p-), Detecta Serviço (-sV) e SO (-O)
-	cmd := exec.Command("sudo", "nmap", "-O", "-sV", "-T4", "-p-", "--max-os-tries", "2", ip)
-	output, err := cmd.CombinedOutput()
+	// Escaneia as principais portas (--top-ports 1000), Detecta Serviço (-sV) e SO (-O)
+	cmd := exec.Command("sudo", "nmap", "-O", "-sV", "-T4", "--top-ports", "1000", "--max-os-tries", "2", ip)
+	
+	var outBuf bytes.Buffer
+	cmd.Stdout = io.MultiWriter(os.Stdout, &outBuf)
+	cmd.Stderr = io.MultiWriter(os.Stderr, &outBuf)
+	
+	err := cmd.Run()
 	if err != nil {
-		return string(output), fmt.Errorf("erro executando nmap: %v", err)
+		return outBuf.String(), fmt.Errorf("erro executando nmap: %v", err)
 	}
 
-	return string(output), nil
+	return outBuf.String(), nil
 }
 
 // NmapFastDeepScan realiza uma varredura focada e mais rápida nas portas mais vitais,
@@ -83,11 +91,16 @@ func NmapFastDeepScan(ip string) (string, error) {
 
 	// Escaneia top 100 portas, Detecta Serviço (-sV), SO (-O), ignora ping bloqueado (-Pn) e roda scripts
 	cmd := exec.Command("sudo", "nmap", "-Pn", "-O", "-sV", "-T4", "--top-ports", "100", "--script=vuln,discovery", "--host-timeout", "2m", "--max-os-tries", "1", ip)
-	output, err := cmd.CombinedOutput()
+	
+	var outBuf bytes.Buffer
+	cmd.Stdout = io.MultiWriter(os.Stdout, &outBuf)
+	cmd.Stderr = io.MultiWriter(os.Stderr, &outBuf)
+
+	err := cmd.Run()
 	if err != nil {
-		return string(output), fmt.Errorf("erro executando nmap: %v", err)
+		return outBuf.String(), fmt.Errorf("erro executando nmap: %v", err)
 	}
 
-	return string(output), nil
+	return outBuf.String(), nil
 }
 
