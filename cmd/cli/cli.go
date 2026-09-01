@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -209,6 +210,7 @@ func (c *CLI) runPortScanMenu(scanner *bufio.Scanner) {
   %s[ 3 ]%s Escanear dispositivos na rede WiFi
   %s[ 4 ]%s Modo Promíscuo (Escuta Passiva)
   %s[ 5 ]%s ARP Spoof (Man-in-the-Middle)
+  %s[ 6 ]%s Escanear IPs extraídos do log_rede.txt (Nmap Deep Scan)
   %s[ 0 ]%s Voltar
 `
 	fmt.Printf(submenu,
@@ -217,6 +219,7 @@ func (c *CLI) runPortScanMenu(scanner *bufio.Scanner) {
 		view.Yellow, view.Reset,
 		view.Yellow, view.Reset,
 		view.Yellow, view.Reset,
+		view.Magenta, view.Reset,
 		view.Red, view.Reset,
 	)
 	fmt.Printf("  %s%sport >%s ", view.Bold, view.Green, view.Reset)
@@ -239,6 +242,8 @@ func (c *CLI) runPortScanMenu(scanner *bufio.Scanner) {
 		c.runPromiscuousMode(scanner)
 	case "5":
 		c.runARPSpoof(scanner)
+	case "6":
+		c.runNmapFromLogs(scanner)
 	default:
 		c.printer.PrintError("Opção inválida.")
 	}
@@ -430,6 +435,9 @@ func (c *CLI) runMonitorMenu(scanner *bufio.Scanner, snifferSvc *sniffer.Sniffer
 		fmt.Printf("  %s[ 4 ]%s 👁️  Ativar/Desativar Tracer (Ping) em segundo plano\n", view.Yellow, view.Reset)
 		fmt.Printf("  %s[ 5 ]%s 📤 Enviar Arquivo ao Alvo (WPAD File Injection)\n", view.Magenta, view.Reset)
 		fmt.Printf("  %s[ 6 ]%s 💥 Forçar Pop-up de Arquivo (Captive Portal Kick)\n", view.Magenta, view.Reset)
+		if runtime.GOOS == "linux" && scannerPkg.IsNmapInstalled() {
+			fmt.Printf("  %s[ 7 ]%s 🔍 Deep Scan (Nmap) no alvo (Verifica SO, Portas, Serviços)\n", view.Magenta, view.Reset)
+		}
 		fmt.Printf("  %s[ 0 ]%s 🔙 Encerrar MitM e Restaurar Rede (gera log_ip.txt)\n", view.Red, view.Reset)
 		fmt.Printf("  %s──────────────────────────────────────────────────────────%s\n", view.Cyan, view.Reset)
 		fmt.Printf("  %s%smonitor > %s ", view.Bold, view.Green, view.Reset)
@@ -652,6 +660,37 @@ func (c *CLI) runMonitorMenu(scanner *bufio.Scanner, snifferSvc *sniffer.Sniffer
 			fmt.Printf("  %s[*] O SO do alvo deve realizar a checagem HTTP agora e abrir o pop-up.%s\n", view.White, view.Reset)
 			fmt.Printf("  %s[*] Fique de olho nos logs (Opção 1) ou aguarde o aviso de download.%s\n\n", view.White, view.Reset)
 
+		case "7":
+			if runtime.GOOS == "linux" && scannerPkg.IsNmapInstalled() {
+				fmt.Printf("\n  %s%s--- NMAP DEEP SCAN ---%s\n", view.Bold, view.Magenta, view.Reset)
+				if len(targetIPs) == 0 {
+					continue
+				}
+				target := targetIPs[0] // Scan no primeiro alvo
+				fmt.Printf("  %s[*] Iniciando Nmap Avançado no IP %s... (Isso pode demorar alguns minutos)%s\n", view.White, target, view.Reset)
+				
+				// Pausa temporariamente os logs visuais caso estejam ativos
+				wasShowingLogs := showLogs.Load()
+				if wasShowingLogs {
+					showLogs.Store(false)
+				}
+				
+				output, err := scannerPkg.NmapDeepScan(target)
+				
+				if wasShowingLogs {
+					showLogs.Store(true)
+				}
+				
+				if err != nil {
+					fmt.Printf("  %s[-] Erro executando Nmap: %v%s\n", view.Red, err, view.Reset)
+				} else {
+					fmt.Printf("\n  %s[✓ RELATÓRIO NMAP]%s\n", view.Green, view.Reset)
+					fmt.Println(output)
+				}
+			} else {
+				c.printer.PrintError("Nmap não está instalado ou SO não suportado.")
+			}
+
 		case "":
 			if showLogs.Load() {
 				showLogs.Store(false)
@@ -850,6 +889,80 @@ func (c *CLI) runDNSMenu(scanner *bufio.Scanner) {
 	}
 	fmt.Println()
 }
+// runNmapFromLogs lê os IPs do arquivo log_rede.txt e dispara o Nmap (focado) neles.
+func (c *CLI) runNmapFromLogs(scanner *bufio.Scanner) {
+	if runtime.GOOS != "linux" || !scannerPkg.IsNmapInstalled() {
+		c.printer.PrintError("Nmap não suportado no SO atual ou não instalado.")
+		return
+	}
+
+	fmt.Printf("\n  %s%s--- Leitor de Logs e Nmap Deep Scan ---%s\n", view.Bold, view.Magenta, view.Reset)
+	
+	fileBytes, err := os.ReadFile("log_rede.txt")
+	if err != nil {
+		c.printer.PrintError(fmt.Sprintf("Erro ao ler log_rede.txt: %v", err))
+		return
+	}
+	content := string(fileBytes)
+
+	// Regex para encontrar os IPs ignorando os IPv6
+	reIP := regexp.MustCompile(`- IP: ((?:\d{1,3}\.){3}\d{1,3})`)
+	matches := reIP.FindAllStringSubmatch(content, -1)
+
+	if len(matches) == 0 {
+		c.printer.PrintError("Nenhum IPv4 encontrado no log_rede.txt.")
+		return
+	}
+
+	// Remove IPs duplicados
+	ipSet := make(map[string]bool)
+	var uniqueIPs []string
+	for _, m := range matches {
+		ip := m[1]
+		if !ipSet[ip] {
+			ipSet[ip] = true
+			uniqueIPs = append(uniqueIPs, ip)
+		}
+	}
+
+	fmt.Printf("  %s[*] %d IPv4 único(s) encontrado(s) no log.%s\n", view.White, len(uniqueIPs), view.Reset)
+	fmt.Printf("  %sDeseja rodar o Nmap nesses IPs? Isso pode demorar. (s/n):%s ", view.Bold, view.Reset)
+	
+	if !scanner.Scan() {
+		return
+	}
+	if strings.ToLower(strings.TrimSpace(scanner.Text())) != "s" {
+		return
+	}
+
+	fmt.Printf("  %s[*] Iniciando Nmap Fast Deep Scan nos alvos...%s\n\n", view.Yellow, view.Reset)
+
+	var relatorio strings.Builder
+	relatorio.WriteString("=========================================================================\n")
+	relatorio.WriteString("                   RELATÓRIO NMAP (A PARTIR DOS LOGS)                    \n")
+	relatorio.WriteString("=========================================================================\n\n")
+
+	for _, ip := range uniqueIPs {
+		fmt.Printf("  %s-> Escaneando %s ...%s\n", view.Cyan, ip, view.Reset)
+		out, err := scannerPkg.NmapFastDeepScan(ip)
+		
+		relatorio.WriteString(fmt.Sprintf("--- ALVO: %s ---\n", ip))
+		if err != nil {
+			relatorio.WriteString(fmt.Sprintf("Erro: %v\n", err))
+		}
+		relatorio.WriteString(out)
+		relatorio.WriteString("\n-------------------------------------------------------------------------\n\n")
+	}
+
+	err = os.WriteFile("log_nmap.txt", []byte(relatorio.String()), 0644)
+	if err != nil {
+		c.printer.PrintError(fmt.Sprintf("Erro ao salvar log_nmap.txt: %v", err))
+		return
+	}
+
+	fmt.Printf("\n  %s[✓] Escaneamento concluído! Resultados salvos em log_nmap.txt.%s\n\n", view.Green, view.Reset)
+}
+
 
 // runLoadTestMenu cria dezenas de conexões concorrentes para testar a resiliência de um servidor HTTP.
 func (c *CLI) runLoadTestMenu(scanner *bufio.Scanner) {
