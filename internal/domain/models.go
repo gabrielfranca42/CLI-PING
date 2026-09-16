@@ -141,3 +141,24 @@ type NetworkDiagnosticResult struct {
 	RawTracert  string    // Saída bruta do comando tracert/traceroute (caminho e gargalos)
 	Timestamp   time.Time // Momento da análise
 }
+
+// DeauthConfig configura o ataque de deauthentication WiFi 802.11.
+// O ataque forja Management Frames (Deauth) para forçar a desconexão de clientes,
+// permitindo a captura do 4-Way Handshake EAPOL quando o cliente reconecta.
+// Requer Linux com placa WiFi em Monitor Mode e suporte a injeção de pacotes.
+type DeauthConfig struct {
+	Interface   string // Interface WiFi em modo monitor (ex: wlan0mon, wlan0)
+	TargetBSSID string // MAC do Access Point alvo (ex: "AA:BB:CC:DD:EE:FF")
+	ClientMAC   string // MAC do cliente específico (vazio = broadcast FF:FF:FF:FF:FF:FF, desconecta todos)
+	Channel     int    // Canal WiFi do AP alvo (ex: 6, 11, 36)
+	Count       int    // Número de frames deauth a enviar (0 = contínuo até Ctrl+C)
+	Reason      uint16 // Reason Code IEEE 802.11 (padrão: 7 = Class 3 frame received from nonassociated STA)
+}
+
+// DeauthResult armazena o resultado final de uma operação de deauthentication.
+type DeauthResult struct {
+	PacketsSent int           // Quantidade total de frames Deauth enviados
+	Duration    time.Duration // Tempo total de execução do ataque
+	Method      string        // Método utilizado: "aireplay-ng" ou "gopacket-native"
+	Error       string        // Mensagem de erro (vazio se sucesso)
+}
