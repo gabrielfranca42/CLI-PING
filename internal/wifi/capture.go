@@ -172,12 +172,10 @@ func RunCapture(ctx context.Context, iface string, outputFile string, onOutput f
 		return fmt.Errorf("hcxdumptool não encontrado: %w", err)
 	}
 
-	// hcxdumptool -i <interface> -o <output.pcapng> --active_beacon --enable_status=15
+	// hcxdumptool v7.1.2+ usa -w para pcapng e removeu --active_beacon e --enable_status
 	cmd := exec.CommandContext(ctx, "sudo", dumptoolPath,
 		"-i", iface,
-		"-o", outputFile,
-		"--active_beacon",
-		"--enable_status=15",
+		"-w", outputFile,
 	)
 
 	stdout, err := cmd.StdoutPipe()
