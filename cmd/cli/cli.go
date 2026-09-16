@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -1436,6 +1438,7 @@ func (c *CLI) runWiFiMenu(scanner *bufio.Scanner) {
   %s[ 3 ]%s Dicionário (Wordlist Attack)
   %s[ 4 ]%s Configurar caminho do Hashcat
   %s[ 5 ]%s Capturar Handshake (Guia + Conversão .hc22000)
+  %s[ 6 ]%s 💀 Deauth Attack (Forçar Desconexão — Linux Only)
   %s[ 0 ]%s Voltar
 `
 		fmt.Printf(submenu,
@@ -1444,6 +1447,7 @@ func (c *CLI) runWiFiMenu(scanner *bufio.Scanner) {
 			view.Yellow, view.Reset,
 			view.Yellow, view.Reset,
 			view.Cyan, view.Reset,
+			view.Red, view.Reset,
 			view.Red, view.Reset,
 		)
 		fmt.Printf("  %s%swifi >%s ", view.Bold, view.Magenta, view.Reset)
@@ -1466,6 +1470,8 @@ func (c *CLI) runWiFiMenu(scanner *bufio.Scanner) {
 			c.runConfigHashcat(scanner)
 		case "5":
 			c.runHandshakeCapture(scanner)
+		case "6":
+			c.runDeauthMenu(scanner)
 		default:
 			c.printer.PrintError("Opção inválida.")
 		}
@@ -1688,6 +1694,15 @@ func (c *CLI) runAutomaticCapture(scanner *bufio.Scanner) {
 	}
 	if strings.ToLower(strings.TrimSpace(scanner.Text())) != "s" {
 		return
+	}
+
+	// Garante que a interface seja restaurada para o modo managed (e que o NetworkManager volte)
+	if !isWindows {
+		defer func() {
+			fmt.Printf("\n  %s[*] Restaurando interface %s para modo normal...%s\n", view.Cyan, selectedIfaceName, view.Reset)
+			_ = wifi.DisableMonitorMode(selectedIfaceName)
+			fmt.Printf("  %s[✓] Interface restaurada.%s\n", view.Green, view.Reset)
+		}()
 	}
 
 	fmt.Printf("\n  %s[🔴 CAPTURANDO...] Ctrl+C para parar%s\n\n", view.Red, view.Reset)
@@ -1988,4 +2003,243 @@ func (c *CLI) executeHashcat(config domain.HashcatConfig) {
 	}
 	
 	fmt.Printf("  %s%s══════════════════════════════════════════════════════════%s\n\n", view.Bold, view.Magenta, view.Reset)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Deauthentication Attack (WiFi 802.11)
+// ──────────────────────────────────────────────────────────────────────────────
+
+// runDeauthMenu controla o submenu de Deauthentication Attack.
+// Permite ao usuário selecionar um AP alvo, configurar parâmetros e executar o ataque.
+// Apenas Linux — verifica o SO antes de prosseguir.
+func (c *CLI) runDeauthMenu(scanner *bufio.Scanner) {
+	// Verifica se estamos no Linux
+	if runtime.GOOS != "linux" {
+		fmt.Printf("\n  %s[✖] Deauthentication Attack só está disponível no Linux.%s\n", view.Red, view.Reset)
+		fmt.Printf("  %s[*] Drivers WiFi no Windows/macOS não suportam injeção de Management Frames 802.11.%s\n", view.Yellow, view.Reset)
+		return
+	}
+
+	fmt.Printf("\n  %s%s══════════════════════════════════════════════════════════%s\n", view.Bold, view.Red, view.Reset)
+	fmt.Printf("  %s%s       💀 DEAUTHENTICATION ATTACK — WiFi 802.11          %s\n", view.Bold, view.Red, view.Reset)
+	fmt.Printf("  %s%s══════════════════════════════════════════════════════════%s\n", view.Bold, view.Red, view.Reset)
+
+	// Disclaimer legal obrigatório
+	fmt.Printf("\n  %s[⚠️  AVISO LEGAL]%s\n", view.Bold+view.Yellow, view.Reset)
+	fmt.Printf("  %sO uso desta funcionalidade é restrito a redes PRÓPRIAS ou%s\n", view.Yellow, view.Reset)
+	fmt.Printf("  %scom AUTORIZAÇÃO EXPLÍCITA do proprietário. Deauthentication%s\n", view.Yellow, view.Reset)
+	fmt.Printf("  %sem redes alheias é ILEGAL na maioria das jurisdições.%s\n", view.Yellow, view.Reset)
+	fmt.Printf("\n  %sVocê tem autorização para testar esta rede? (s/N):%s ", view.Bold, view.Reset)
+
+	if !scanner.Scan() {
+		return
+	}
+	confirm := strings.ToLower(strings.TrimSpace(scanner.Text()))
+	if confirm != "s" && confirm != "y" && confirm != "sim" && confirm != "yes" {
+		fmt.Printf("  %s[*] Operação cancelada.%s\n", view.Cyan, view.Reset)
+		return
+	}
+
+	// Verifica ferramentas disponíveis
+	aireplayPath, aireplayErr := wifi.CheckDeauthTools()
+	if aireplayErr != nil {
+		fmt.Printf("  %s[!] aireplay-ng: Não encontrado (fallback para gopacket nativo)%s\n", view.Yellow, view.Reset)
+	} else {
+		fmt.Printf("  %s[✓] aireplay-ng: %s%s\n", view.Green, aireplayPath, view.Reset)
+	}
+
+	// Lista interfaces WiFi disponíveis
+	fmt.Printf("\n  %s[*] Buscando interfaces WiFi...%s\n", view.Cyan, view.Reset)
+	ifaces, err := wifi.ListMonitorInterfaces()
+	if err != nil || len(ifaces) == 0 {
+		fmt.Printf("  %s[!] Nenhuma interface WiFi encontrada via 'iw dev'.%s\n", view.Yellow, view.Reset)
+		fmt.Printf("  %sDigite o nome da interface manualmente (ex: wlan0):%s ", view.Bold, view.Reset)
+		if !scanner.Scan() {
+			return
+		}
+		iface := strings.TrimSpace(scanner.Text())
+		if iface == "" || iface == "voltar" {
+			return
+		}
+		ifaces = []string{iface}
+	} else {
+		fmt.Printf("  %sInterfaces encontradas:%s\n", view.Green, view.Reset)
+		for i, iface := range ifaces {
+			fmt.Printf("    %s[%d]%s %s\n", view.Yellow, i+1, view.Reset, iface)
+		}
+	}
+
+	// Selecionar interface
+	var selectedIface string
+	if len(ifaces) == 1 {
+		selectedIface = ifaces[0]
+		fmt.Printf("  %s[*] Usando interface: %s%s\n", view.Cyan, selectedIface, view.Reset)
+	} else {
+		fmt.Printf("\n  %sEscolha a interface (número):%s ", view.Bold, view.Reset)
+		if !scanner.Scan() {
+			return
+		}
+		idx, err := strconv.Atoi(strings.TrimSpace(scanner.Text()))
+		if err != nil || idx < 1 || idx > len(ifaces) {
+			c.printer.PrintError("Seleção inválida.")
+			return
+		}
+		selectedIface = ifaces[idx-1]
+	}
+
+	// Ativar modo monitor
+	fmt.Printf("\n  %s[*] Ativando modo monitor em %s...%s\n", view.Cyan, selectedIface, view.Reset)
+	monIface, err := wifi.EnableMonitorMode(selectedIface)
+	if err != nil {
+		c.printer.PrintError(fmt.Sprintf("Falha ao ativar modo monitor: %v", err))
+		fmt.Println(wifi.GetDeauthInstructions())
+		return
+	}
+	fmt.Printf("  %s[✓] Modo monitor ativo em: %s%s\n", view.Green, monIface, view.Reset)
+
+	// Garantir restauração da interface ao sair
+	defer func() {
+		fmt.Printf("\n  %s[*] Restaurando interface %s para modo managed...%s\n", view.Cyan, monIface, view.Reset)
+		_ = wifi.DisableMonitorMode(monIface)
+		fmt.Printf("  %s[✓] Interface restaurada.%s\n", view.Green, view.Reset)
+	}()
+
+	// Solicitar BSSID do AP alvo
+	fmt.Printf("\n  %sDigite o BSSID (MAC) do AP alvo (ex: AA:BB:CC:DD:EE:FF):%s\n", view.Bold, view.Reset)
+	fmt.Printf("  %s[dica: use a opção 1 do menu WiFi para escanear redes]%s\n", view.White, view.Reset)
+	fmt.Printf("  %s%sbssid >%s ", view.Bold, view.Red, view.Reset)
+
+	if !scanner.Scan() {
+		return
+	}
+	bssid := strings.TrimSpace(scanner.Text())
+	if bssid == "" || bssid == "voltar" {
+		return
+	}
+
+	// Validar formato do BSSID
+	if _, err := net.ParseMAC(bssid); err != nil {
+		c.printer.PrintError(fmt.Sprintf("BSSID inválido: %s", bssid))
+		return
+	}
+
+	// Canal do AP
+	fmt.Printf("\n  %sDigite o canal do AP alvo (ex: 6, 11, 36):%s\n", view.Bold, view.Reset)
+	fmt.Printf("  %s%scanal >%s ", view.Bold, view.Red, view.Reset)
+
+	if !scanner.Scan() {
+		return
+	}
+	channel, err := strconv.Atoi(strings.TrimSpace(scanner.Text()))
+	if err != nil || channel < 1 || channel > 196 {
+		c.printer.PrintError("Canal inválido.")
+		return
+	}
+
+	// MAC do cliente (opcional)
+	fmt.Printf("\n  %sDigite o MAC do cliente alvo (ou Enter para todos — broadcast):%s\n", view.Bold, view.Reset)
+	fmt.Printf("  %s%scliente >%s ", view.Bold, view.Red, view.Reset)
+
+	if !scanner.Scan() {
+		return
+	}
+	clientMAC := strings.TrimSpace(scanner.Text())
+	if clientMAC != "" {
+		if _, err := net.ParseMAC(clientMAC); err != nil {
+			c.printer.PrintError(fmt.Sprintf("MAC do cliente inválido: %s", clientMAC))
+			return
+		}
+	}
+
+	// Número de pacotes
+	fmt.Printf("\n  %sQuantos pacotes deauth enviar? (0 = contínuo até Ctrl+C, padrão: 0):%s\n", view.Bold, view.Reset)
+	fmt.Printf("  %s%spacotes >%s ", view.Bold, view.Red, view.Reset)
+
+	if !scanner.Scan() {
+		return
+	}
+	countStr := strings.TrimSpace(scanner.Text())
+	count := 0
+	if countStr != "" {
+		count, _ = strconv.Atoi(countStr)
+	}
+
+	// Montar configuração
+	config := domain.DeauthConfig{
+		Interface:   monIface,
+		TargetBSSID: bssid,
+		ClientMAC:   clientMAC,
+		Channel:     channel,
+		Count:       count,
+		Reason:      7, // Class 3 frame received from nonassociated STA
+	}
+
+	// Resumo antes de iniciar
+	fmt.Printf("\n  %s%s────────────────────── RESUMO ──────────────────────%s\n", view.Bold, view.Red, view.Reset)
+	fmt.Printf("  %s  Interface  :%s %s\n", view.Yellow, view.Reset, monIface)
+	fmt.Printf("  %s  AP (BSSID) :%s %s\n", view.Yellow, view.Reset, bssid)
+	if clientMAC != "" {
+		fmt.Printf("  %s  Cliente    :%s %s\n", view.Yellow, view.Reset, clientMAC)
+	} else {
+		fmt.Printf("  %s  Cliente    :%s FF:FF:FF:FF:FF:FF (broadcast — todos)\n", view.Yellow, view.Reset)
+	}
+	fmt.Printf("  %s  Canal      :%s %d\n", view.Yellow, view.Reset, channel)
+	if count > 0 {
+		fmt.Printf("  %s  Pacotes    :%s %d\n", view.Yellow, view.Reset, count)
+	} else {
+		fmt.Printf("  %s  Pacotes    :%s Contínuo (Ctrl+C para parar)\n", view.Yellow, view.Reset)
+	}
+	fmt.Printf("  %s%s──────────────────────────────────────────────────%s\n", view.Bold, view.Red, view.Reset)
+
+	fmt.Printf("\n  %sPressione Enter para iniciar ou 'voltar' para cancelar:%s ", view.Bold, view.Reset)
+	if !scanner.Scan() {
+		return
+	}
+	if strings.TrimSpace(scanner.Text()) == "voltar" {
+		return
+	}
+
+	// Executa o ataque com contexto cancelável (Ctrl+C)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Captura Ctrl+C para parar graciosamente
+	go func() {
+		// Aguarda Enter para cancelar
+		// (o sinal SIGINT já é tratado pelo runtime do Go)
+		fmt.Printf("\n  %s[*] Pressione Enter para parar o ataque...%s\n", view.Yellow, view.Reset)
+		scanner.Scan()
+		cancel()
+	}()
+
+	fmt.Printf("\n  %s[💀] Iniciando Deauthentication Attack...%s\n\n", view.Bold+view.Red, view.Reset)
+
+	onOutput := func(line string) {
+		fmt.Printf("  %s%s%s\n", view.White, line, view.Reset)
+	}
+
+	result, err := wifi.RunDeauth(ctx, config, onOutput)
+
+	// Exibe resultado final
+	fmt.Printf("\n  %s%s══════════════════ RESULTADO ══════════════════════%s\n", view.Bold, view.Red, view.Reset)
+	if err != nil {
+		c.printer.PrintError(fmt.Sprintf("Erro: %v", err))
+	} else {
+		fmt.Printf("  %s  Método       :%s %s\n", view.Yellow, view.Reset, result.Method)
+		fmt.Printf("  %s  Frames Env.  :%s %d\n", view.Yellow, view.Reset, result.PacketsSent)
+		fmt.Printf("  %s  Duração      :%s %s\n", view.Yellow, view.Reset, result.Duration.Truncate(time.Second))
+		if result.Error != "" {
+			fmt.Printf("  %s  Aviso        :%s %s\n", view.Red, view.Reset, result.Error)
+		}
+	}
+	fmt.Printf("  %s%s══════════════════════════════════════════════════%s\n", view.Bold, view.Red, view.Reset)
+
+	// Oferece capturar handshake na sequência
+	fmt.Printf("\n  %sDeseja capturar o Handshake agora? (s/N):%s ", view.Bold, view.Reset)
+	if scanner.Scan() {
+		resp := strings.ToLower(strings.TrimSpace(scanner.Text()))
+		if resp == "s" || resp == "y" || resp == "sim" {
+			c.runHandshakeCapture(scanner)
+		}
+	}
 }
