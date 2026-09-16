@@ -108,7 +108,7 @@ func (w *WiFiService) scanLinux() ([]domain.WiFiNetwork, error) {
 	cmd := exec.Command("nmcli", "-t", "-f", "SSID,BSSID,SIGNAL,CHAN,SECURITY", "dev", "wifi", "list")
 	output, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("falha ao executar nmcli: %w", err)
+		return nil, fmt.Errorf("falha ao executar nmcli: %w (certifique-se de que o pacote 'network-manager' está instalado. Ex: sudo apt install network-manager)", err)
 	}
 
 	var networks []domain.WiFiNetwork
